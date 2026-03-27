@@ -3,6 +3,7 @@ using IntelliCAD.EditorInput;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -19,6 +20,13 @@ namespace Rough_Works
 {
     public class Class1
     {
+        [CommandMethod("ShowForm")]
+        public void ShowForm()
+        {
+            Form1 form = new Form1();            
+            form.ShowDialog();
+        }
+
         [CommandMethod("ReadAlignmentStationLabels")]
         public void ReadAlignmentStationLabels()
         {

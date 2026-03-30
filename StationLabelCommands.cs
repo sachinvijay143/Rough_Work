@@ -19,17 +19,13 @@ using Exception = System.Exception;
 
 namespace Rough_Works
 {
-    // ═══════════════════════════════════════════════════════════════════
-    // DATA MODELS — defined ONCE, do NOT redeclare in any other file
-    // ═══════════════════════════════════════════════════════════════════
-
     public class MTextInfo
     {
         public string RawText { get; set; }
-        public string CleanText { get; set; }  // full clean   e.g. "11+98 W"
-        public string Value { get; set; }  // station part e.g. "11+98"
-        public string DirectionSuffix { get; set; }  // direction    e.g. "W"
-        public int WholeNumber { get; set; }  // part before + e.g. 11
+        public string CleanText { get; set; }
+        public string Value { get; set; }
+        public string DirectionSuffix { get; set; }
+        public int WholeNumber { get; set; }
         public Point3d Location { get; set; }
         public string SourceType { get; set; }
         public double DistanceToBlock { get; set; }
@@ -42,10 +38,6 @@ namespace Rough_Works
         public double Distance { get; set; }
         public List<MTextInfo> Texts { get; set; } = new List<MTextInfo>();
     }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // COMMANDS
-    // ═══════════════════════════════════════════════════════════════════
 
     public class StationLabelCommands
     {
@@ -141,6 +133,19 @@ namespace Rough_Works
 
         // ───────────────────────────────────────────────────────────────
         // COMMAND 2: BLOCKNEARESTSTATION
+        // Step 1 → Select Block
+        // Step 2 → Select the EXACT AlignmentStationLabeling
+        //
+        // TOP 2 LOGIC — split by block insertion point:
+        //   The label lies along an alignment line.
+        //   The block insertion point sits ON that line.
+        //   MTexts appear on BOTH sides of the block along the alignment.
+        //   So we pick:
+        //     - 1 MText from the side where MText.X >= blockPos.X  (right/above)
+        //     - 1 MText from the side where MText.X <  blockPos.X  (left/below)
+        //   If label is more vertical, split by Y instead.
+        //   Within each side pick the nearest to block.
+        //   This guarantees 1 from each direction along the alignment.
         // ───────────────────────────────────────────────────────────────
         [CommandMethod("BLOCKNEARESTSTATION")]
         public void BlockNearestStation()
@@ -151,23 +156,8 @@ namespace Rough_Works
 
             try
             {
-                // STEP 1: Select ONE AlignmentStationLabeling as type reference
-                ed.WriteMessage(
-                    "\n[Step 1] Select ONE AlignmentStationLabeling as reference: ");
-
-                PromptEntityOptions peoLabel = new PromptEntityOptions(
-                    "\nSelect AlignmentStationLabeling (reference): ");
-                peoLabel.AllowNone = false;
-
-                PromptEntityResult perLabel = ed.GetEntity(peoLabel);
-                if (perLabel.Status != PromptStatus.OK)
-                {
-                    ed.WriteMessage("\nCancelled.");
-                    return;
-                }
-
-                // STEP 2: Select the Block
-                ed.WriteMessage("\n[Step 2] Now select the Block object: ");
+                // STEP 1: Select the Block
+                ed.WriteMessage("\n[Step 1] Select the Block object: ");
 
                 PromptEntityOptions peoBlock = new PromptEntityOptions(
                     "\nSelect a Block object: ");
@@ -182,18 +172,24 @@ namespace Rough_Works
                     return;
                 }
 
+                // STEP 2: Select the EXACT AlignmentStationLabeling
+                ed.WriteMessage(
+                    "\n[Step 2] Select the AlignmentStationLabeling to read: ");
+
+                PromptEntityOptions peoLabel = new PromptEntityOptions(
+                    "\nSelect AlignmentStationLabeling: ");
+                peoLabel.AllowNone = false;
+
+                PromptEntityResult perLabel = ed.GetEntity(peoLabel);
+                if (perLabel.Status != PromptStatus.OK)
+                {
+                    ed.WriteMessage("\nCancelled.");
+                    return;
+                }
+
                 using (Transaction tr = db.TransactionManager.StartTransaction())
                 {
-                    // STEP 3: Capture exact runtime type from reference label
-                    DBObject refObj = tr.GetObject(
-                        perLabel.ObjectId, OpenMode.ForRead);
-                    Type labelType = refObj.GetType();
-                    string labelTypeName = labelType.FullName;
-
-                    ed.WriteMessage(
-                        $"\n✔ Reference label type: {labelTypeName}");
-
-                    // STEP 4: Get block position
+                    // STEP 3: Get block position
                     BlockReference selectedBlock = tr.GetObject(
                         perBlock.ObjectId, OpenMode.ForRead) as BlockReference;
 
@@ -210,82 +206,31 @@ namespace Rough_Works
                         $"\nBlock Position : X={blockPos.X:F4}" +
                         $"  Y={blockPos.Y:F4}");
 
-                    // STEP 5: Scan model space — exact type match
-                    BlockTable bt = tr.GetObject(
-                        db.BlockTableId, OpenMode.ForRead) as BlockTable;
-                    BlockTableRecord modelSpace = tr.GetObject(
-                        bt[BlockTableRecord.ModelSpace],
-                        OpenMode.ForRead) as BlockTableRecord;
+                    // STEP 4: Open the exactly selected label
+                    DBObject labelObj = tr.GetObject(
+                        perLabel.ObjectId, OpenMode.ForRead);
+                    Entity labelEnt = labelObj as Entity;
+                    string labelType = labelObj.GetType().Name;
 
-                    Entity nearestLabel = null;
-                    double nearestDist = double.MaxValue;
+                    ed.WriteMessage($"\nLabel Type     : {labelType}");
 
-                    ed.WriteMessage($"\n\nScanning for [{labelTypeName}]...");
-
-                    foreach (ObjectId objId in modelSpace)
-                    {
-                        if (objId == perBlock.ObjectId ||
-                            objId == perLabel.ObjectId) continue;
-
-                        try
-                        {
-                            DBObject dbObj = tr.GetObject(objId, OpenMode.ForRead);
-                            if (dbObj.GetType() != labelType) continue;
-
-                            Entity ent = dbObj as Entity;
-                            if (ent == null) continue;
-
-                            Point3d pos = GetEntityCenter(ent);
-                            double dist = blockPos.DistanceTo(pos);
-
-                            ed.WriteMessage($"\n  Found label @ dist={dist:F2}");
-
-                            if (dist < nearestDist)
-                            {
-                                nearestDist = dist;
-                                nearestLabel = ent;
-                            }
-                        }
-                        catch { }
-                    }
-
-                    // Also check reference label itself
-                    try
-                    {
-                        Entity refEnt = refObj as Entity;
-                        Point3d refPos = GetEntityCenter(refEnt);
-                        double refDist = blockPos.DistanceTo(refPos);
-                        ed.WriteMessage(
-                            $"\n  Reference label @ dist={refDist:F2}");
-                        if (refDist < nearestDist)
-                        {
-                            nearestDist = refDist;
-                            nearestLabel = refEnt;
-                        }
-                    }
-                    catch { }
-
-                    if (nearestLabel == null)
+                    if (labelEnt == null)
                     {
                         ed.WriteMessage(
-                            "\n✘ No AlignmentStationLabeling found.");
-                        tr.Commit();
+                            "\n✘ Selected label is not a valid Entity.");
                         return;
                     }
 
-                    ed.WriteMessage(
-                        $"\n\n✔ Nearest label distance: {nearestDist:F4}");
-
-                    // STEP 6: Collect ALL MText — with distance to block
+                    // STEP 5: Collect ALL MText from the selected label
                     List<MTextInfo> allTexts = new List<MTextInfo>();
                     CollectAllMTexts(
-                        nearestLabel, allTexts, ed,
+                        labelEnt, allTexts, ed,
                         level: 1, blockPos: blockPos);
 
                     if (allTexts.Count == 0)
                     {
                         ed.WriteMessage(
-                            "\n✘ No MText found inside nearest label.");
+                            "\n✘ No MText found in the selected label.");
                         tr.Commit();
                         return;
                     }
@@ -293,42 +238,127 @@ namespace Rough_Works
                     ed.WriteMessage(
                         $"\n  Total MText collected: {allTexts.Count}");
 
-                    // STEP 7: Get TOP 2 nearest MTexts by distance to block
-                    List<MTextInfo> top2 = allTexts
-                        .OrderBy(t => t.DistanceToBlock)
-                        .Take(2)
-                        .ToList();
-
-                    // STEP 8: Extract whole numbers from top2 Values
-                    //         e.g. "5+00" → 5,  "6+50" → 6
-                    //         Then pick the one with the LOWEST whole number
-                    int wholeNum1 = top2.Count > 0 ? top2[0].WholeNumber : -1;
-                    int wholeNum2 = top2.Count > 1 ? top2[1].WholeNumber : -1;
-
-                    ed.WriteMessage($"\n\n  Top 2 Whole Numbers:");
-                    ed.WriteMessage(
-                        $"\n    [1] \"{top2[0].CleanText}\"" +
-                        $"  WholeNumber={wholeNum1}");
-                    if (top2.Count > 1)
+                    // ── DEBUG: show all collected ───────────────────────
+                    ed.WriteMessage($"\n\n{'─',65}");
+                    ed.WriteMessage("  [DEBUG] All collected MTexts:");
+                    foreach (MTextInfo t in allTexts)
                         ed.WriteMessage(
-                            $"\n    [2] \"{top2[1].CleanText}\"" +
-                            $"  WholeNumber={wholeNum2}");
+                            $"\n    Clean=\"{t.CleanText}\"" +
+                            $"  X={t.Location.X:F2}" +
+                            $"  Y={t.Location.Y:F2}" +
+                            $"  WholeNo={t.WholeNumber}" +
+                            $"  Dist={t.DistanceToBlock:F2}");
+                    ed.WriteMessage($"\n{'─',65}");
+                    // ────────────────────────────────────────────────────
 
-                    // Pick the MTextInfo with the lowest whole number
+                    // STEP 6: Split MTexts by block insertion point
+                    //
+                    // Determine alignment direction:
+                    //   Compare X-spread vs Y-spread of all MText locations.
+                    //   More X spread → alignment is HORIZONTAL → split by X
+                    //   More Y spread → alignment is VERTICAL   → split by Y
+                    //
+                    // Then split using the BLOCK INSERTION POINT as divider:
+                    //   Horizontal: sideA = MText.X >= blockPos.X  (right of block)
+                    //               sideB = MText.X <  blockPos.X  (left  of block)
+                    //   Vertical:   sideA = MText.Y >= blockPos.Y  (above block)
+                    //               sideB = MText.Y <  blockPos.Y  (below block)
+                    //
+                    // Within each side pick the 1 nearest to block.
+
+                    double xSpread = allTexts.Max(t => t.Location.X)
+                                   - allTexts.Min(t => t.Location.X);
+                    double ySpread = allTexts.Max(t => t.Location.Y)
+                                   - allTexts.Min(t => t.Location.Y);
+
+                    bool isHorizontal = xSpread >= ySpread;
+
+                    ed.WriteMessage(
+                        $"\n  X-Spread={xSpread:F4}  Y-Spread={ySpread:F4}" +
+                        $"  Split by={(isHorizontal ? "X (HORIZONTAL)" : "Y (VERTICAL)")}");
+                    ed.WriteMessage(
+                        $"\n  Block split point:" +
+                        $"  {(isHorizontal ? $"X={blockPos.X:F4}" : $"Y={blockPos.Y:F4}")}");
+
+                    MTextInfo sideA = null;  // right of block (X>=) or above (Y>=)
+                    MTextInfo sideB = null;  // left  of block (X<)  or below (Y<)
+
+                    if (isHorizontal)
+                    {
+                        // Split by block X position
+                        sideA = allTexts
+                            .Where(t => t.Location.X >= blockPos.X)
+                            .OrderBy(t => t.DistanceToBlock)
+                            .FirstOrDefault();
+
+                        sideB = allTexts
+                            .Where(t => t.Location.X < blockPos.X)
+                            .OrderBy(t => t.DistanceToBlock)
+                            .FirstOrDefault();
+                    }
+                    else
+                    {
+                        // Split by block Y position
+                        sideA = allTexts
+                            .Where(t => t.Location.Y >= blockPos.Y)
+                            .OrderBy(t => t.DistanceToBlock)
+                            .FirstOrDefault();
+
+                        sideB = allTexts
+                            .Where(t => t.Location.Y < blockPos.Y)
+                            .OrderBy(t => t.DistanceToBlock)
+                            .FirstOrDefault();
+                    }
+
+                    ed.WriteMessage(
+                        $"\n  SideA (right/above block): " +
+                        $"\"{(sideA != null ? sideA.CleanText : "none")}\"");
+                    ed.WriteMessage(
+                        $"\n  SideB (left/below  block): " +
+                        $"\"{(sideB != null ? sideB.CleanText : "none")}\"");
+
+                    // Build top2 — one from each side
+                    List<MTextInfo> top2 = new List<MTextInfo>();
+                    if (sideA != null) top2.Add(sideA);
+                    if (sideB != null) top2.Add(sideB);
+
+                    // Fallback: if all MTexts are on the same side of the block
+                    // (block is at the very end of the alignment)
+                    // fall back to 2 nearest by distance
+                    if (top2.Count < 2)
+                    {
+                        ed.WriteMessage(
+                            "\n  [INFO] All MTexts on same side of block —" +
+                            " falling back to 2 nearest by distance.");
+                        top2 = allTexts
+                            .OrderBy(t => t.DistanceToBlock)
+                            .Take(2)
+                            .ToList();
+                    }
+
+                    ed.WriteMessage($"\n\n  Top 2 (one from each side of block):");
+                    for (int i = 0; i < top2.Count; i++)
+                        ed.WriteMessage(
+                            $"\n    [{i + 1}] \"{top2[i].CleanText}\"" +
+                            $"  WholeNumber={top2[i].WholeNumber}" +
+                            $"  Dist={top2[i].DistanceToBlock:F4}");
+
+                    // STEP 7: From top2 pick lowest whole number
                     MTextInfo lowestResult = top2
-                        .Where(t => t.WholeNumber >= 0) // only valid numbers
+                        .Where(t => t.WholeNumber >= 0)
                         .OrderBy(t => t.WholeNumber)
-                        .FirstOrDefault() ?? top2[0];   // fallback to first
+                        .FirstOrDefault() ?? top2[0];
 
-                    // STEP 9: Display result
+                    // STEP 8: Display result
                     ed.WriteMessage($"\n\n{'─',65}");
                     ed.WriteMessage($"\n  Block          : {selectedBlock.Name}");
                     ed.WriteMessage(
                         $"\n  Block Position : X={blockPos.X:F4}" +
                         $"  Y={blockPos.Y:F4}");
-                    ed.WriteMessage($"\n  Label Distance : {nearestDist:F4}");
+                    ed.WriteMessage($"\n  Label Type     : {labelType}");
                     ed.WriteMessage($"\n{'─',65}");
-                    ed.WriteMessage($"\n  Top 2 nearest MText (by distance to block):");
+                    ed.WriteMessage(
+                        "\n  Top 2 MText (one from each side of block):");
 
                     for (int i = 0; i < top2.Count; i++)
                     {
@@ -356,17 +386,17 @@ namespace Rough_Works
                         $"  Y={lowestResult.Location.Y:F4}");
                     ed.WriteMessage($"\n{'─',65}");
 
-                    // Dialog
                     System.Text.StringBuilder sb = new System.Text.StringBuilder();
-                    sb.AppendLine("Nearest Station Label — Result");
+                    sb.AppendLine("Station Label — Result");
                     sb.AppendLine(new string('─', 48));
                     sb.AppendLine($"Block          : {selectedBlock.Name}");
                     sb.AppendLine(
                         $"Block Position : X={blockPos.X:F4}" +
                         $"  Y={blockPos.Y:F4}");
-                    sb.AppendLine($"Label Distance : {nearestDist:F4}");
+                    sb.AppendLine($"Label Type     : {labelType}");
                     sb.AppendLine(new string('─', 48));
-                    sb.AppendLine("Top 2 nearest MText:");
+                    sb.AppendLine(
+                        "Top 2 MText (one from each side of block):");
 
                     for (int i = 0; i < top2.Count; i++)
                     {
@@ -408,10 +438,6 @@ namespace Rough_Works
         // SHARED HELPER METHODS
         // ═══════════════════════════════════════════════════════════════
 
-        /// <summary>
-        /// Recursively explodes entity and collects ALL MText / DBText /
-        /// AttributeRef. Value, DirectionSuffix and WholeNumber populated.
-        /// </summary>
         private void CollectAllMTexts(
             Entity entity,
             List<MTextInfo> results,
@@ -475,10 +501,7 @@ namespace Rough_Works
                     string stationValue, suffix;
                     ParseValueAndSuffix(clean, out stationValue, out suffix);
 
-                    // Extract whole number from value
-                    // "11+98" → 11,  "5+00" → 5,  "100" → 100
                     int wholeNumber = ExtractWholeNumber(stationValue);
-
                     double distToBlock = blockPos.HasValue
                         ? blockPos.Value.DistanceTo(location)
                         : 0.0;
@@ -496,7 +519,8 @@ namespace Rough_Works
                     });
 
                     ed.WriteMessage(
-                        $"\n    ✔ {srcType} @ Y={location.Y:F2}" +
+                        $"\n    ✔ {srcType}" +
+                        $"  X={location.X:F2}  Y={location.Y:F2}" +
                         $"  Dist={distToBlock:F2}" +
                         $"  Full=\"{clean}\"" +
                         $"  Value=\"{stationValue}\"" +
@@ -512,20 +536,10 @@ namespace Rough_Works
         }
 
 
-        /// <summary>
-        /// Extracts the whole number from a station value string.
-        /// "11+98"  → 11
-        /// "5+00"   → 5
-        /// "6+50.5" → 6
-        /// "100"    → 100
-        /// "STA"    → -1  (not a number)
-        /// </summary>
         private int ExtractWholeNumber(string value)
         {
             if (string.IsNullOrWhiteSpace(value)) return -1;
 
-            // If value contains '+' take the part before it
-            // e.g. "11+98" → "11"
             string part = value.Contains("+")
                 ? value.Substring(0, value.IndexOf('+')).Trim()
                 : value.Trim();
@@ -535,14 +549,6 @@ namespace Rough_Works
         }
 
 
-        /// <summary>
-        /// Parses clean text into station Value and DirectionSuffix.
-        /// "11+98 W"  → Value="11+98"  Suffix="W"
-        /// "11+98 NE" → Value="11+98"  Suffix="NE"
-        /// "11+98W"   → Value="11+98"  Suffix="W"
-        /// "W"        → Value=""       Suffix="W"
-        /// "11+98"    → Value="11+98"  Suffix=""
-        /// </summary>
         private void ParseValueAndSuffix(
             string cleanText,
             out string stationValue,
@@ -561,25 +567,20 @@ namespace Rough_Works
                 "N", "S", "E", "W", "L", "R"
             };
 
-            // Strategy 1: ends with " SUFFIX" e.g. "11+98 W"
             foreach (string sfx in knownSuffixes)
             {
-                if (input.EndsWith(" " + sfx,
-                    StringComparison.OrdinalIgnoreCase))
+                if (input.EndsWith(" " + sfx, StringComparison.OrdinalIgnoreCase))
                 {
                     stationValue = input
-                        .Substring(0, input.Length - sfx.Length - 1)
-                        .Trim();
+                        .Substring(0, input.Length - sfx.Length - 1).Trim();
                     directionSuffix = sfx.ToUpper();
                     return;
                 }
             }
 
-            // Strategy 2: entire string is a suffix e.g. "W"
             foreach (string sfx in knownSuffixes)
             {
-                if (string.Equals(input, sfx,
-                    StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(input, sfx, StringComparison.OrdinalIgnoreCase))
                 {
                     stationValue = string.Empty;
                     directionSuffix = sfx.ToUpper();
@@ -587,14 +588,12 @@ namespace Rough_Works
                 }
             }
 
-            // Strategy 3: no space e.g. "11+98W"
             foreach (string sfx in knownSuffixes)
             {
                 if (input.EndsWith(sfx, StringComparison.OrdinalIgnoreCase))
                 {
                     string candidate = input
-                        .Substring(0, input.Length - sfx.Length)
-                        .Trim();
+                        .Substring(0, input.Length - sfx.Length).Trim();
                     if (!string.IsNullOrWhiteSpace(candidate))
                     {
                         stationValue = candidate;
@@ -609,20 +608,13 @@ namespace Rough_Works
         }
 
 
-        /// <summary>
-        /// Strips ONLY known MText formatting codes.
-        /// Preserves all text content including S, W, E, N.
-        /// </summary>
         private string StripMTextFormatting(string raw)
         {
             if (string.IsNullOrEmpty(raw)) return string.Empty;
 
             string result = raw;
-
-            result = Regex.Replace(
-                result, @"\\([HhWwQqTtAaCcFf])[^;]*;", string.Empty);
-            result = Regex.Replace(
-                result, @"\\f[^;]*;", string.Empty);
+            result = Regex.Replace(result, @"\\([HhWwQqTtAaCcFf])[^;]*;", string.Empty);
+            result = Regex.Replace(result, @"\\f[^;]*;", string.Empty);
             result = result.Replace(@"\P", "\n");
             result = result.Replace(@"\p", "\n");
             result = Regex.Replace(result, @"\\[LlOoKk]", string.Empty);
@@ -632,15 +624,10 @@ namespace Rough_Works
             result = result.Replace(@"\n", string.Empty);
             result = result.Replace("{", string.Empty);
             result = result.Replace("}", string.Empty);
-
             return result.Trim();
         }
 
 
-        /// <summary>
-        /// Returns geometric center via bounding box.
-        /// Falls back to insertion point for BlockReference.
-        /// </summary>
         private Point3d GetEntityCenter(Entity entity)
         {
             try

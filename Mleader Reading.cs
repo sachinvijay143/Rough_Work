@@ -11,384 +11,143 @@ using Teigha.Runtime;
 namespace Rough_Works
 {
     internal class Mleader_Reading
-    {        
-        [CommandMethod("TEST_MLEADER_BLOCK")]
-        public void TestMLeaderBlock()
+    {  
+        [CommandMethod("ReadMLeaderBlock")]
+        public void ReadMLeaderBlock()
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
-            Editor ed = doc.Editor;
             Database db = doc.Database;
+            Editor ed = doc.Editor;
 
-            // 👉 Select MLeader
-            PromptEntityOptions peo = new PromptEntityOptions("\nSelect MLeader: ");
-            peo.SetRejectMessage("\nOnly MLeader allowed.");
-            peo.AddAllowedClass(typeof(MLeader), true);
+            // 1. Select the MLeader
+            PromptEntityOptions opt = new PromptEntityOptions("\nSelect an MLeader with a block: ");
+            opt.SetRejectMessage("\nObject must be an MLeader.");
+            opt.AddAllowedClass(typeof(MLeader), false);
 
-            PromptEntityResult per = ed.GetEntity(peo);
-
-            if (per.Status != PromptStatus.OK)
-                return;
+            PromptEntityResult res = ed.GetEntity(opt);
+            if (res.Status != PromptStatus.OK) return;
 
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
-                MLeader ml = tr.GetObject(per.ObjectId, OpenMode.ForRead) as MLeader;
+                MLeader ml = tr.GetObject(res.ObjectId, OpenMode.ForRead) as MLeader;
 
-                if (ml == null)
+                if (ml != null && ml.ContentType == ContentType.BlockContent)
                 {
-                    ed.WriteMessage("\nNot a valid MLeader.");
-                    return;
-                }
+                    ObjectId blockDefId = ml.BlockContentId;
+                    BlockTableRecord btr = tr.GetObject(blockDefId, OpenMode.ForRead) as BlockTableRecord;
 
-                // ✅ Check content type
-                ed.WriteMessage($"\nContentType: {ml.ContentType}");
+                    ed.WriteMessage($"\n--- MLeader Block: {btr.Name} ---");
 
-                if (ml.ContentType != ContentType.BlockContent)
-                {
-                    ed.WriteMessage("\nThis MLeader does NOT contain a block.");
-                    return;
-                }
-
-                try
-                {
-                    // 🔥 Explode to get BlockReference
-                    DBObjectCollection objs = new DBObjectCollection();
-                    ml.Explode(objs);
-
-                    bool found = false;
-
-                    foreach (DBObject obj in objs)
+                    foreach (ObjectId id in btr)
                     {
-                        if (obj is BlockReference br)
+                        // We only care about Attribute Definitions inside the block
+                        AttributeDefinition attDef = tr.GetObject(id, OpenMode.ForRead) as AttributeDefinition;
+
+                        if (attDef != null)
                         {
-                            BlockTableRecord btr = (BlockTableRecord)tr.GetObject(br.BlockTableRecord, OpenMode.ForRead);
-
-                            string blockName = btr.Name;
-
-                            ed.WriteMessage($"\nBlock Name: {blockName}");
-
-                            found = true;
-                            break;
+                            // Instead of GetBlockAttributeValue, we use GetBlockAttribute
+                            // This returns an AttributeReference object for that specific Tag
+                            using (AttributeReference attRef = ml.GetBlockAttribute(id))
+                            {
+                                string val = (attRef != null) ? attRef.TextString : "N/A";
+                                ed.WriteMessage($"\nTag: {attDef.Tag} | Value: {val}");
+                            }
                         }
                     }
-
-                    if (!found)
-                    {
-                        ed.WriteMessage("\nNo BlockReference found after explode.");
-                    }
                 }
-                catch (System.Exception ex)
+                else
                 {
-                    ed.WriteMessage($"\nError: {ex.Message}");
+                    ed.WriteMessage("\nThe selected MLeader does not contain block content.");
                 }
-
                 tr.Commit();
             }
         }
 
-        [CommandMethod("TEST_MLEADER_BLOCK_ATT")]
-        public void TestMLeaderBlockAttribute()
+        [CommandMethod("ResequenceMLeaders")]
+        public void ResequenceMLeaders()
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
-            Editor ed = doc.Editor;
             Database db = doc.Database;
+            Editor ed = doc.Editor;
 
-            PromptEntityOptions peo = new PromptEntityOptions("\nSelect MLeader: ");
-            peo.SetRejectMessage("\nOnly MLeader allowed.");
-            peo.AddAllowedClass(typeof(MLeader), true);
-
-            PromptEntityResult per = ed.GetEntity(peo);
-
-            if (per.Status != PromptStatus.OK)
-                return;
+            int totalProcessedCount = 0; // Final counter
 
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
-                MLeader ml = tr.GetObject(per.ObjectId, OpenMode.ForRead) as MLeader;
+                // 1. Get Layouts excluding Model Space, sorted by TabOrder
+                DBDictionary layoutDict = tr.GetObject(db.LayoutDictionaryId, OpenMode.ForRead) as DBDictionary;
+                var sortedLayouts = layoutDict
+                    .Cast<DBDictionaryEntry>()
+                    .Select(entry => tr.GetObject(entry.Value, OpenMode.ForRead) as Layout)
+                    .Where(lay => !lay.ModelType)
+                    .OrderBy(lay => lay.TabOrder);
 
-                if (ml == null)
-                    return;
+                int sequenceCounter = 1;
+                string targetBlockName = "CIRCLE FOR LEADER";
+                string targetTagName = "PH";
+                string prefix = "P";
 
-                ed.WriteMessage($"\nContentType: {ml.ContentType}");
+                ed.WriteMessage("\n--- Starting Resequence Process ---");
 
-                if (ml.ContentType != ContentType.BlockContent)
+                foreach (Layout lay in sortedLayouts)
                 {
-                    ed.WriteMessage("\nNot a block-based MLeader.");
-                    return;
-                }
+                    // 2. Access the Paper Space BlockTableRecord for this layout
+                    BlockTableRecord btr = tr.GetObject(lay.BlockTableRecordId, OpenMode.ForRead) as BlockTableRecord;
 
-                try
-                {
-                    DBObjectCollection objs = new DBObjectCollection();
-                    ml.Explode(objs);
-
-                    foreach (DBObject obj in objs)
+                    foreach (ObjectId entId in btr)
                     {
-                        if (obj is BlockReference br)
+                        // Check if entity is an MLeader
+                        if (entId.ObjectClass.Name == "AcDbMLeader")
                         {
-                            BlockTableRecord btr = (BlockTableRecord)tr.GetObject(br.BlockTableRecord, OpenMode.ForRead);
-                            ed.WriteMessage($"\nBlock Name: {btr.Name}");
+                            MLeader ml = tr.GetObject(entId, OpenMode.ForRead) as MLeader;
 
-                            // 🔥 SAFE ATTRIBUTE READ
-                            foreach (ObjectId attId in br.AttributeCollection)
+                            if (ml != null && ml.ContentType == ContentType.BlockContent)
                             {
-                                DBObject attObj = tr.GetObject(attId, OpenMode.ForRead);
+                                BlockTableRecord mLeaderBlkDef = tr.GetObject(ml.BlockContentId, OpenMode.ForRead) as BlockTableRecord;
 
-                                if (attObj is AttributeReference attRef)
+                                // 3. Verify Block Name
+                                if (mLeaderBlkDef.Name.Equals(targetBlockName, StringComparison.OrdinalIgnoreCase))
                                 {
-                                    ed.WriteMessage($"\nTag: {attRef.Tag}  Value: {attRef.TextString}");
-
-                                    if (attRef.Tag.Equals("PH", StringComparison.OrdinalIgnoreCase))
+                                    // 4. Find the "PH" Attribute Definition in the block
+                                    foreach (ObjectId attId in mLeaderBlkDef)
                                     {
-                                        ed.WriteMessage($"\n👉 PH Value: {attRef.TextString}");
+                                        AttributeDefinition attDef = tr.GetObject(attId, OpenMode.ForRead) as AttributeDefinition;
+
+                                        if (attDef != null && attDef.Tag.Equals(targetTagName, StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            string expectedVal = prefix + sequenceCounter.ToString();
+
+                                            using (AttributeReference attRef = ml.GetBlockAttribute(attId))
+                                            {
+                                                string currentVal = attRef.TextString;
+
+                                                // 5. Update only if value is different
+                                                if (currentVal != expectedVal)
+                                                {
+                                                    ml.UpgradeOpen();
+                                                    // Note: We pass a new AttributeReference with the updated text
+                                                    ml.SetBlockAttribute(attId, new AttributeReference { TextString = expectedVal });
+                                                }
+                                            }
+
+                                            sequenceCounter++;
+                                            totalProcessedCount++;
+                                            break; // Found the tag, move to next MLeader
+                                        }
                                     }
-                                }
-                                else
-                                {
-                                    // Debug: what type is this?
-                                    ed.WriteMessage($"\nUnexpected type: {attObj.GetType().Name}");
                                 }
                             }
                         }
                     }
                 }
-                catch (System.Exception ex)
-                {
-                    ed.WriteMessage($"\nError: {ex.Message}");
-                }
 
                 tr.Commit();
-            }
-        }
 
-        [CommandMethod("MLEADER_PH_SORT_PS")]
-        public void GetAllMLeaderPHSorted()
-        {
-            Document doc = Application.DocumentManager.MdiActiveDocument;
-            Editor ed = doc.Editor;
-            Database db = doc.Database;
-
-            // Store results: (numeric value, original text, ObjectId)
-            List<(int num, string raw, ObjectId id)> data = new List<(int, string, ObjectId)>();
-
-            using (Transaction tr = db.TransactionManager.StartTransaction())
-            {
-                BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
-                BlockTableRecord ps = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.PaperSpace], OpenMode.ForRead);
-
-                foreach (ObjectId entId in ps)
-                {
-                    Entity ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
-
-                    if (!(ent is MLeader ml))
-                        continue;
-
-                    // Only block-based MLeader
-                    if (ml.ContentType != ContentType.BlockContent)
-                        continue;
-
-                    try
-                    {
-                        DBObjectCollection objs = new DBObjectCollection();
-                        ml.Explode(objs);
-
-                        foreach (DBObject obj in objs)
-                        {
-                            string textValue = null;
-
-                            // ✅ Extract visible text
-                            if (obj is DBText txt)
-                                textValue = txt.TextString;
-
-                            else if (obj is MText mt)
-                                textValue = mt.Contents;
-
-                            if (string.IsNullOrWhiteSpace(textValue))
-                                continue;
-
-                            // 🔥 Extract numeric part (P2 → 2, PH10 → 10)
-                            string numberPart = new string(textValue.Where(char.IsDigit).ToArray());
-
-                            if (int.TryParse(numberPart, out int num))
-                            {
-                                data.Add((num, textValue, entId));
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        // silently ignore problematic MLeaders
-                    }
-                }
-
-                tr.Commit();
-            }
-
-            // ✅ Sort numerically
-            var sorted = data.OrderBy(x => x.num).ToList();
-
-            // ✅ Output
-            ed.WriteMessage("\n--- Sorted PH Values (PaperSpace) ---");
-
-            foreach (var item in sorted)
-            {
-                ed.WriteMessage($"\nPH: {item.raw}  →  {item.num} | Id: {item.id}");
-            }
-        }
-
-        [CommandMethod("GET_MLEADER_PH")]
-        public void GetMLeaderPH()
-        {
-            Document doc = Application.DocumentManager.MdiActiveDocument;
-            Editor ed = doc.Editor;
-            Database db = doc.Database;
-
-            PromptEntityOptions peo = new PromptEntityOptions("\nSelect MLeader: ");
-            peo.SetRejectMessage("\nOnly MLeader allowed.");
-            peo.AddAllowedClass(typeof(MLeader), true);
-
-            PromptEntityResult per = ed.GetEntity(peo);
-
-            if (per.Status != PromptStatus.OK)
-                return;
-
-            using (Transaction tr = db.TransactionManager.StartTransaction())
-            {
-                MLeader ml = tr.GetObject(per.ObjectId, OpenMode.ForRead) as MLeader;
-
-                if (ml == null)
-                    return;
-
-                if (ml.ContentType != ContentType.BlockContent)
-                {
-                    ed.WriteMessage("\nNot a block-based MLeader.");
-                    return;
-                }
-
-                try
-                {
-                    DBObjectCollection objs = new DBObjectCollection();
-                    ml.Explode(objs);
-
-                    foreach (DBObject obj in objs)
-                    {
-                        // ✅ Read TEXT (this holds your PH value visually)
-                        if (obj is DBText txt)
-                        {
-                            ed.WriteMessage($"\nFound Text: {txt.TextString}");
-                        }
-                        else if (obj is MText mt)
-                        {
-                            ed.WriteMessage($"\nFound MText: {mt.Contents}");
-                        }
-                    }
-                }
-                catch (System.Exception ex)
-                {
-                    ed.WriteMessage($"\nError: {ex.Message}");
-                }
-
-                tr.Commit();
-            }
-        }
-
-        [CommandMethod("READ_MLEADER_FULL")]
-        public void ReadMLeaderFull()
-        {
-            Document doc = Application.DocumentManager.MdiActiveDocument;
-            Editor ed = doc.Editor;
-            Database db = doc.Database;
-
-            PromptEntityOptions peo = new PromptEntityOptions("\nSelect MLeader: ");
-            peo.SetRejectMessage("\nOnly MLeader allowed.");
-            peo.AddAllowedClass(typeof(MLeader), true);
-
-            PromptEntityResult per = ed.GetEntity(peo);
-            if (per.Status != PromptStatus.OK)
-                return;
-
-            using (Transaction tr = db.TransactionManager.StartTransaction())
-            {
-                MLeader ml = tr.GetObject(per.ObjectId, OpenMode.ForRead) as MLeader;
-
-                if (ml == null)
-                    return;
-
-                ed.WriteMessage($"\nContentType: {ml.ContentType}");
-
-                if (ml.ContentType != ContentType.BlockContent)
-                {
-                    ed.WriteMessage("\nNot a block-based MLeader.");
-                    return;
-                }
-
-                try
-                {
-                    DBObjectCollection exploded = new DBObjectCollection();
-                    ml.Explode(exploded);
-
-                    foreach (DBObject obj in exploded)
-                    {
-                        ed.WriteMessage($"\nType: {obj.GetType().Name}");
-
-                        // ✅ BLOCK NAME
-                        if (obj is BlockReference br)
-                        {
-                            try
-                            {
-                                BlockTableRecord btr =
-                                    (BlockTableRecord)tr.GetObject(br.BlockTableRecord, OpenMode.ForRead);
-
-                                ed.WriteMessage($"\nBlock Name: {btr.Name}");
-
-                                // 🔥 TRY ATTRIBUTE READING (SAFE)
-                                foreach (ObjectId attId in br.AttributeCollection)
-                                {
-                                    DBObject attObj = null;
-
-                                    try
-                                    {
-                                        attObj = tr.GetObject(attId, OpenMode.ForRead);
-                                    }
-                                    catch
-                                    {
-                                        continue; // skip invalid objects
-                                    }
-
-                                    // ✅ Case 1: AttributeReference (ideal)
-                                    if (attObj is AttributeReference attRef)
-                                    {
-                                        ed.WriteMessage($"\n[ATTR-REF] {attRef.Tag} = {attRef.TextString}");
-                                    }
-                                    // ✅ Case 2: AttributeDefinition (fallback)
-                                    else if (attObj is AttributeDefinition attDef)
-                                    {
-                                        ed.WriteMessage($"\n[ATTR-DEF] {attDef.Tag} = {attDef.TextString}");
-                                    }
-                                }
-                            }
-                            catch (System.Exception ex)
-                            {
-                                ed.WriteMessage($"\nBlock Error: {ex.Message}");
-                            }
-                        }
-
-                        // ✅ TEXT (MOST RELIABLE IN YOUR CASE)
-                        if (obj is DBText txt)
-                        {
-                            ed.WriteMessage($"\n[TEXT] {txt.TextString}");
-                        }
-                        else if (obj is MText mt)
-                        {
-                            ed.WriteMessage($"\n[MTEXT] {mt.Contents}");
-                        }
-                    }
-                }
-                catch (System.Exception ex)
-                {
-                    ed.WriteMessage($"\nError: {ex.Message}");
-                }
-
-                tr.Commit();
+                // 6. Display final summary
+                ed.WriteMessage("\n------------------------------------");
+                ed.WriteMessage($"\nResequencing complete!");
+                ed.WriteMessage($"\nTotal MLeader Blocks Found/Updated: {totalProcessedCount}");
+                ed.WriteMessage("\n------------------------------------");
             }
         }
 

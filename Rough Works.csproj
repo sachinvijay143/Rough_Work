@@ -62,7 +62,10 @@
       <DependentUpon>Form1.cs</DependentUpon>
     </Compile>
     <Compile Include="Hatch_Automation.cs" />
+    <Compile Include="IntersectionTracker.cs" />
+    <Compile Include="Misc.cs" />
     <Compile Include="Mleader Reading.cs" />
+    <Compile Include="Pot-Hole Resequencing.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="StationLabelCommands.cs" />
   </ItemGroup>

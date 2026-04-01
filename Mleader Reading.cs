@@ -866,7 +866,7 @@ namespace Rough_Works
             // 4. Export to Text File
             ExportLogToFile(fileLogLines, globalTotalCount);
 
-            ed.WriteMessage($"\nProcess Complete. Total MLeaders: {globalTotalCount}. Log saved to Desktop.");
+            ed.WriteMessage($"\nProcess Complete. Total MLeaders: {globalTotalCount}. Log saved to Drawing Folder.");
         }
 
         private void UpdateSummaryTable(Transaction tr, IEnumerable<Layout> layouts, int totalCount, Editor ed)
@@ -902,12 +902,20 @@ namespace Rough_Works
 
         private void ExportLogToFile(List<string> lines, int total)
         {
-            string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-            string filePath = Path.Combine(desktopPath, "MLeader_Resequence_Log.txt");
+            string desktop = System.IO.Path.GetDirectoryName(
+                                Application.DocumentManager.MdiActiveDocument.Name);
+            string drawingName =
+                System.IO.Path.GetFileNameWithoutExtension(
+                    Application.DocumentManager.MdiActiveDocument.Name);
+            string newFolderPath = System.IO.Path.Combine(
+                desktop, "BOM Output");
+            if (!System.IO.Directory.Exists(newFolderPath))
+                System.IO.Directory.CreateDirectory(newFolderPath);
+            string filePath = Path.Combine(newFolderPath,drawingName + "POT-HOLE_Resequence_Log.txt");
 
             using (StreamWriter sw = new StreamWriter(filePath))
             {
-                sw.WriteLine($"TOTAL MLEADER COUNT: {total}");
+                sw.WriteLine($"TOTAL POT-HOLE COUNT: {total}");
                 sw.WriteLine($"DATE: {DateTime.Now}");
                 sw.WriteLine();
                 foreach (string line in lines) sw.WriteLine(line);
@@ -946,8 +954,11 @@ namespace Rough_Works
                     }
                 }
             }
-        }
+        }      
 
+        
+        
+        
         
     }
     public class MLeaderData

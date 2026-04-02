@@ -14,8 +14,8 @@ namespace Rough_Works
 {
     internal class Misc
     {
-        [CommandMethod("PlacePHLeader")]
-        public void PlacePHLeader()
+        [CommandMethod("Place_PHLeader")]
+        public void Place_PHLeader()
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
             Database db = doc.Database;
@@ -275,8 +275,8 @@ namespace Rough_Works
         //    }
         //}
 
-        [CommandMethod("PlacePHLeaderFinal")]
-        public void PlacePHLeaderFinal()
+        [CommandMethod("PlacePHLeader")]
+        public void PlacePHLeader()
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
             Database db = doc.Database;
@@ -362,5 +362,99 @@ namespace Rough_Works
             }
         }
 
+        [CommandMethod("PlacePHLeaderFinal")]
+        public void PlacePHLeaderCommand()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor ed = doc.Editor;
+
+            // 1. Get Inputs (These would be passed automatically in a loop)
+            PromptPointOptions ppo1 = new PromptPointOptions("\nSpecify arrowhead point: ");
+            PromptPointResult ppr1 = ed.GetPoint(ppo1);
+            if (ppr1.Status != PromptStatus.OK) return;
+
+            PromptStringOptions pso = new PromptStringOptions("\nEnter PH value: ");
+            PromptResult psr = ed.GetString(pso);
+            if (psr.Status != PromptStatus.OK) return;
+
+            // 2. Call the Reusable Method
+            // We pass the transaction-ready logic inside
+            using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
+            {
+                CreatePHMLeader(tr, doc.Database, ppr1.Value, psr.StringResult);
+                tr.Commit();
+            }
+
+            ed.WriteMessage("\nMLeader placed via reusable method.");
+        }
+
+        /// <summary>
+        /// Reusable method to place a PH MLeader with a fixed offset bubble.
+        /// </summary>
+        public void CreatePHMLeader(Transaction tr, Database db, Point3d arrowheadPt, string phValue)
+        {
+            // 1. Define Fixed Offset (Adjust these values to change bubble distance)
+            // Example: Place the bubble 2.0 units to the right and 2.0 units up from the arrowhead
+            double offsetX = 2.0;
+            double offsetY = 2.0;
+            Point3d bubblePt = new Point3d(arrowheadPt.X + offsetX, arrowheadPt.Y + offsetY, arrowheadPt.Z);
+
+            // 2. Access Style and Block
+            DBDictionary mlStyleDict = (DBDictionary)tr.GetObject(db.MLeaderStyleDictionaryId, OpenMode.ForRead);
+            ObjectId styleId = db.MLeaderstyle;
+            if (mlStyleDict.Contains("BUBBLE")) styleId = mlStyleDict.GetAt("BUBBLE");
+
+            BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+            if (!bt.Has("CIRCLE FOR LEADER")) return;
+            ObjectId blockId = bt["CIRCLE FOR LEADER"];
+
+            // 3. Create MLeader
+            MLeader ml = new MLeader();
+            ml.SetDatabaseDefaults();
+            ml.MLeaderStyle = styleId;
+
+            // Properties
+            ml.Layer = "0";
+            ml.Color = Teigha.Colors.Color.FromColorIndex(Teigha.Colors.ColorMethod.ByColor, 7);
+            ml.Scale = 0.0;
+            ml.LandingGap = 0.0;
+            ml.Annotative = AnnotativeStates.False;
+            ml.ContentType = ContentType.BlockContent;
+            ml.BlockContentId = blockId;
+
+            // Scale
+            double s = 0.48425;
+            ml.BlockScale = new Scale3d(s, s, s);
+
+            // 4. Geometry
+            int ldIdx = ml.AddLeader();
+            int lnIdx = ml.AddLeaderLine(ldIdx);
+            ml.AddFirstVertex(lnIdx, arrowheadPt); // Start at user pick
+            ml.AddLastVertex(lnIdx, bubblePt);    // End at calculated offset
+
+            ml.ArrowSize = 0.06053;
+
+            // 5. Set Attribute
+            BlockTableRecord btr = (BlockTableRecord)tr.GetObject(blockId, OpenMode.ForRead);
+            foreach (ObjectId id in btr)
+            {
+                AttributeDefinition attDef = tr.GetObject(id, OpenMode.ForRead) as AttributeDefinition;
+                if (attDef != null && attDef.Tag.Equals("PH", StringComparison.OrdinalIgnoreCase))
+                {
+                    using (AttributeReference attRef = new AttributeReference())
+                    {
+                        attRef.SetAttributeFromBlock(attDef, Matrix3d.Identity);
+                        attRef.TextString = phValue;
+                        ml.SetBlockAttribute(id, attRef);
+                    }
+                    break;
+                }
+            }
+
+            // 6. Append
+            BlockTableRecord curSpace = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
+            curSpace.AppendEntity(ml);
+            tr.AddNewlyCreatedDBObject(ml, true);
+        }
     }
 }

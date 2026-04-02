@@ -1,6 +1,7 @@
 ﻿using IntelliCAD.ApplicationServices;
 using IntelliCAD.EditorInput;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -264,6 +265,122 @@ namespace Rough_Works
 
             // If your API supports it, this ensures the block content is drawn
             try { ml.DowngradeOpen(); } catch { }
+        }
+
+        [CommandMethod("BatchChSpaceMLeaders", CommandFlags.Modal)]
+        public void BatchChSpaceMLeaders()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Database db = doc.Database;
+            Editor ed = doc.Editor;
+            LayoutManager lm = LayoutManager.Current;
+
+            string originalLayout = lm.CurrentLayout;
+
+            try
+            {
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    DBDictionary layoutDict = (DBDictionary)tr.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
+
+                    List<string> layoutNames = new List<string>();
+                    foreach (DBDictionaryEntry entry in layoutDict)
+                    {
+                        if (!entry.Key.Equals("Model", StringComparison.OrdinalIgnoreCase))
+                            layoutNames.Add(entry.Key);
+                    }
+
+                    foreach (string layName in layoutNames)
+                    {
+                        lm.CurrentLayout = layName;
+
+                        Layout lay = (Layout)tr.GetObject(layoutDict.GetAt(layName), OpenMode.ForRead);
+                        ObjectIdCollection vportIds = lay.GetViewports();
+
+                        if (vportIds.Count < 2) continue;
+
+                        Viewport vp = (Viewport)tr.GetObject(vportIds[1], OpenMode.ForRead);
+
+                        // Calculate MS boundaries
+                        double scale = vp.CustomScale;
+                        double halfMSWidth = (vp.Width / scale) / 2.0;
+                        double halfMSHeight = (vp.Height / scale) / 2.0;
+                        double minX = vp.ViewCenter.X - halfMSWidth;
+                        double maxX = vp.ViewCenter.X + halfMSWidth;
+                        double minY = vp.ViewCenter.Y - halfMSHeight;
+                        double maxY = vp.ViewCenter.Y + halfMSHeight;
+
+                        TypedValue[] filter = { new TypedValue(0, "MULTILEADER") };
+                        SelectionFilter selFilter = new SelectionFilter(filter);
+
+                        PromptSelectionResult selRes = ed.SelectAll(selFilter);
+
+                        if (selRes.Status == PromptStatus.OK)
+                        {
+                            List<ObjectId> idsToMove = new List<ObjectId>();
+                            foreach (ObjectId id in selRes.Value.GetObjectIds())
+                            {
+                                MLeader ml = (MLeader)tr.GetObject(id, OpenMode.ForRead);
+                                Point3d arrowPt = GetMLeaderArrowhead(ml);
+
+                                if (arrowPt.X >= minX && arrowPt.X <= maxX && arrowPt.Y >= minY && arrowPt.Y <= maxY)
+                                {
+                                    idsToMove.Add(id);
+                                }
+                            }
+
+                            if (idsToMove.Count > 0)
+                            {
+                                ed.SwitchToModelSpace();
+                                Application.SetSystemVariable("CVPORT", vp.Number);
+
+                                ed.SetImpliedSelection(idsToMove.ToArray());
+                                ed.Command("_.CHSPACE", "P", "", "");
+
+                                ed.SwitchToPaperSpace();
+                                ed.WriteMessage($"\nProcessed {idsToMove.Count} MLeaders in {layName}");
+                            }
+                        }
+                    }
+                    tr.Commit();
+                }
+            }
+            catch (System.Exception ex)
+            {
+                ed.WriteMessage("\nError: " + ex.Message);
+            }
+            finally
+            {
+                lm.CurrentLayout = originalLayout;
+            }
+        }
+
+        // Updated helper to use ArrayList and explicit casting
+        private Point3d GetMLeaderArrowhead(MLeader ml)
+        {
+            try
+            {
+                // 1. Get leader indexes as ArrayList
+                ArrayList leaderIndexes = ml.GetLeaderIndexes();
+                if (leaderIndexes != null && leaderIndexes.Count > 0)
+                {
+                    // 2. Get line indexes (Must cast leaderIndexes[0] from object to int)
+                    ArrayList lineIndexes = ml.GetLeaderLineIndexes((int)leaderIndexes[0]);
+                    if (lineIndexes != null && lineIndexes.Count > 0)
+                    {
+                        // 3. Get the vertex (Must cast lineIndexes[0] from object to int)
+                        return ml.GetFirstVertex((int)lineIndexes[0]);
+                    }
+                }
+
+                // Fallback to bounding box center
+                Extents3d ext = ml.GeometricExtents;
+                return ext.MinPoint + (ext.MaxPoint - ext.MinPoint) * 0.5;
+            }
+            catch
+            {
+                return Point3d.Origin;
+            }
         }
     }
 

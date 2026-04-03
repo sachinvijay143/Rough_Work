@@ -758,6 +758,219 @@ namespace Rough_Works
             }
             catch { }
         }
+
+        private static ObjectId _templateMLeaderId = ObjectId.Null;
+
+        [CommandMethod("PICK_MLEADER_TEMPLATE")]
+        public void PickMLeaderTemplate()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Database db = doc.Database;
+            Editor ed = doc.Editor;
+
+            // ── Force user to pick from Model Space only ──
+            // Switch to model space before picking
+            object savedTileMode = Application.GetSystemVariable("TILEMODE");
+            Application.SetSystemVariable("TILEMODE", 1); // Switch to model space
+
+            try
+            {
+                PromptEntityOptions peo = new PromptEntityOptions(
+                    "\nSwitch to MODEL SPACE - Select the correct MLeader as template: ");
+                peo.SetRejectMessage("\nMust select a MLeader.");
+                peo.AddAllowedClass(typeof(MLeader), true);
+                PromptEntityResult per = ed.GetEntity(peo);
+
+                if (per.Status != PromptStatus.OK)
+                {
+                    ed.WriteMessage("\nTemplate selection cancelled.");
+                    return;
+                }
+
+                // Verify it is in model space
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    MLeader ml = tr.GetObject(per.ObjectId, OpenMode.ForRead) as MLeader;
+                    if (ml == null)
+                    {
+                        ed.WriteMessage("\nSelected object is not a MLeader.");
+                        return;
+                    }
+
+                    // Confirm it belongs to model space block table record
+                    ObjectId modelSpaceId = SymbolUtilityServices.GetBlockModelSpaceId(db);
+                    BlockTableRecord owner = tr.GetObject(ml.OwnerId, OpenMode.ForRead) as BlockTableRecord;
+
+                    if (owner == null || owner.ObjectId != modelSpaceId)
+                    {
+                        ed.WriteMessage("\n✘ Selected MLeader is NOT in model space.");
+                        ed.WriteMessage("\n  Please run CHSPACE on a paper space MLeader first,");
+                        ed.WriteMessage("\n  then run PICK_MLEADER_TEMPLATE again and select it.");
+                        tr.Commit();
+                        return;
+                    }
+
+                    _templateMLeaderId = per.ObjectId;
+
+                    ed.WriteMessage($"\n✔ Template stored from MODEL SPACE.");
+                    ed.WriteMessage($"\n  Scale      : {ml.Scale}");
+                    ed.WriteMessage($"\n  BlockScale : {ml.BlockScale.X}");
+                    tr.Commit();
+                }
+            }
+            finally
+            {
+                // Restore original space
+                Application.SetSystemVariable("TILEMODE", savedTileMode);
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        // Auto-find template from model space — no manual picking needed
+        // Scans model space for first MLeader that uses CIRCLE FOR LEADER block
+        // ─────────────────────────────────────────────────────────────
+        [CommandMethod("AUTO_FIND_TEMPLATE")]
+        public void AutoFindTemplate()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Database db = doc.Database;
+            Editor ed = doc.Editor;
+
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                // Get the block id of CIRCLE FOR LEADER
+                BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+                if (!bt.Has("CIRCLE FOR LEADER"))
+                {
+                    ed.WriteMessage("\n✘ Block 'CIRCLE FOR LEADER' not found in drawing.");
+                    return;
+                }
+                ObjectId circleBlockId = bt["CIRCLE FOR LEADER"];
+
+                // Scan model space for MLeader using this block
+                ObjectId modelSpaceId = SymbolUtilityServices.GetBlockModelSpaceId(db);
+                BlockTableRecord ms = (BlockTableRecord)tr.GetObject(modelSpaceId, OpenMode.ForRead);
+
+                foreach (ObjectId id in ms)
+                {
+                    MLeader ml = tr.GetObject(id, OpenMode.ForRead) as MLeader;
+                    if (ml == null) continue;
+                    if (ml.ContentType != ContentType.BlockContent) continue;
+                    if (ml.BlockContentId != circleBlockId) continue;
+
+                    // Found a valid model space MLeader using CIRCLE FOR LEADER
+                    _templateMLeaderId = id;
+
+                    ed.WriteMessage($"\n✔ Template auto-found in MODEL SPACE.");
+                    ed.WriteMessage($"\n  ObjectId   : {id}");
+                    ed.WriteMessage($"\n  Scale      : {ml.Scale}");
+                    ed.WriteMessage($"\n  BlockScale : {ml.BlockScale.X}");
+                    ed.WriteMessage($"\n  Position   : {ml.BlockPosition}");
+                    tr.Commit();
+                    return;
+                }
+
+                ed.WriteMessage("\n✘ No MLeader with 'CIRCLE FOR LEADER' found in model space.");
+                ed.WriteMessage("\n  Either run CHSPACE on one paper space MLeader first,");
+                ed.WriteMessage("\n  or manually run PICK_MLEADER_TEMPLATE from model space.");
+                tr.Commit();
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        // Main creation method — uses model space template via CopyFrom
+        // ─────────────────────────────────────────────────────────────
+        public void CreatePHMLeader(Transaction tr, Database db, Point3d arrowheadPt,
+                                     string phValue, ObjectId templateMLeaderId)
+        {
+            double offsetX = 2.5;
+            double offsetY = 10.5;
+            Point3d bubblePt = new Point3d(arrowheadPt.X + offsetX,
+                                            arrowheadPt.Y + offsetY,
+                                            arrowheadPt.Z);
+
+            MLeader template = tr.GetObject(templateMLeaderId, OpenMode.ForRead) as MLeader;
+            if (template == null) throw new System.Exception("Template MLeader not found.");
+
+            // Verify template is in model space
+            ObjectId modelSpaceId = SymbolUtilityServices.GetBlockModelSpaceId(db);
+            BlockTableRecord owner = tr.GetObject(template.OwnerId, OpenMode.ForRead) as BlockTableRecord;
+            if (owner == null || owner.ObjectId != modelSpaceId)
+                throw new System.Exception(
+                    "Template MLeader must be in model space. " +
+                    "Run AUTO_FIND_TEMPLATE or PICK_MLEADER_TEMPLATE first.");
+
+            // 1. Append to model space — NO SetDatabaseDefaults
+            BlockTableRecord ms = (BlockTableRecord)tr.GetObject(modelSpaceId, OpenMode.ForWrite);
+            MLeader ml = new MLeader();
+            ms.AppendEntity(ml);
+            tr.AddNewlyCreatedDBObject(ml, true);
+
+            // 2. CopyFrom immediately — copies all internal scale state from model space template
+            ml.CopyFrom(template);
+
+            // 3. Remove leader geometry copied from template
+            try
+            {
+                System.Collections.ArrayList leaderIndexes = ml.GetLeaderIndexes();
+                for (int i = leaderIndexes.Count - 1; i >= 0; i--)
+                    ml.RemoveLeader((int)leaderIndexes[i]);
+            }
+            catch { }
+
+            // 4. Set new geometry at correct positions
+            int ldIdx = ml.AddLeader();
+            int lnIdx = ml.AddLeaderLine(ldIdx);
+            ml.AddFirstVertex(lnIdx, arrowheadPt);
+            ml.AddLastVertex(lnIdx, bubblePt);
+            ml.BlockPosition = bubblePt;
+
+            // 5. Set PH attribute
+            ObjectId blockId = ml.BlockContentId;
+            BlockTableRecord btr = (BlockTableRecord)tr.GetObject(blockId, OpenMode.ForRead);
+            foreach (ObjectId id in btr)
+            {
+                AttributeDefinition attDef = tr.GetObject(id, OpenMode.ForRead) as AttributeDefinition;
+                if (attDef != null && attDef.Tag.Equals("PH", StringComparison.OrdinalIgnoreCase))
+                {
+                    using (AttributeReference attRef = new AttributeReference())
+                    {
+                        attRef.SetAttributeFromBlock(attDef, Matrix3d.Identity);
+                        attRef.TextString = phValue;
+                        ml.SetBlockAttribute(id, attRef);
+                    }
+                    break;
+                }
+            }
+
+            ml.RecordGraphicsModified(true);
+        }
+
+        // ── Updated caller that uses the template ──
+        [CommandMethod("TEST_CREATE_MLEADER")]
+        public void TestCreateMLeader()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Database db = doc.Database;
+            Editor ed = doc.Editor;
+
+            if (_templateMLeaderId == ObjectId.Null || !_templateMLeaderId.IsValid)
+            {
+                ed.WriteMessage("\n✘ No template set. Run PICK_MLEADER_TEMPLATE first.");
+                return;
+            }
+
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                // Test: create at a fixed point
+                Point3d arrowPt = new Point3d(0, 0, 0);
+                CreatePHMLeader(tr, db, arrowPt, "7.5", _templateMLeaderId);
+                tr.Commit();
+            }
+
+            ed.WriteMessage("\n✔ Test MLeader created. Check size matches template.");
+        }
+
     }
 
     // --- Data model for label info ---

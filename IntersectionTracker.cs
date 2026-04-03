@@ -8,6 +8,7 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Teigha.Colors;
 using Teigha.DatabaseServices;
 using Teigha.Geometry;
 using Teigha.Runtime;
@@ -190,6 +191,81 @@ namespace Rough_Works
             File.WriteAllText(csvPath, sb.ToString());
         }
 
+        //public void CreatePHMLeader(Transaction tr, Database db, Point3d arrowheadPt, string phValue)
+        //{
+        //    // 1. Define Fixed Offset
+        //    double offsetX = 2.5;
+        //    double offsetY = 10.5;
+        //    Point3d bubblePt = new Point3d(arrowheadPt.X + offsetX, arrowheadPt.Y + offsetY, arrowheadPt.Z);
+
+        //    // 2. Access Style and Block
+        //    DBDictionary mlStyleDict = (DBDictionary)tr.GetObject(db.MLeaderStyleDictionaryId, OpenMode.ForRead);
+        //    ObjectId styleId = db.MLeaderstyle;
+        //    if (mlStyleDict.Contains("BUBBLE"))
+        //        styleId = mlStyleDict.GetAt("BUBBLE");
+
+        //    BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+        //    if (!bt.Has("CIRCLE FOR LEADER")) return;
+        //    ObjectId blockId = bt["CIRCLE FOR LEADER"];
+
+        //    // 3. Create MLeader and append to Model Space
+        //    MLeader ml = new MLeader();
+        //    ml.SetDatabaseDefaults();
+
+        //    ObjectId modelSpaceId = SymbolUtilityServices.GetBlockModelSpaceId(db);
+        //    BlockTableRecord ms = (BlockTableRecord)tr.GetObject(modelSpaceId, OpenMode.ForWrite);
+        //    ms.AppendEntity(ml);
+        //    tr.AddNewlyCreatedDBObject(ml, true);
+
+        //    // 4. Apply style first
+        //    ml.MLeaderStyle = styleId;
+
+        //    // 5. Set properties to EXACTLY match the existing correct MLeader (P2)
+        //    //    Confirmed from DEBUG_COPY_MLEADER_PROPS output:
+        //    //    Scale=0, BlockScale=1, EnableAnnotationScale=True, ArrowSize=0.06053, LandingGap=0.03874
+        //    ml.Scale = 0;              // ← critical: 0 not 1
+        //    ml.EnableAnnotationScale = true;           // ← critical: true not false
+        //    ml.Layer = "0";
+        //    ml.ContentType = ContentType.BlockContent;
+        //    ml.BlockContentId = blockId;
+        //    double s = 0.48425;
+        //    s = 19.36995;
+        //    ml.BlockScale = new Scale3d(s, s, s);
+        //    //ml.BlockScale = new Scale3d(1.0, 1.0, 1.0);
+        //    //ml.BlockScale = new Scale3d(19.36995, 19.36995, 19.36995); // exact model space scale
+        //    ml.ArrowSize = 0.0605310793224527;   // exact value from source
+        //    ml.LandingGap = 0.0387398907663697;   // exact value from source
+        //    ml.BlockRotation = 0;
+
+        //    // 6. Build Geometry (strict order mandatory)
+        //    int ldIdx = ml.AddLeader();
+        //    int lnIdx = ml.AddLeaderLine(ldIdx);
+        //    ml.AddFirstVertex(lnIdx, arrowheadPt);
+        //    ml.AddLastVertex(lnIdx, bubblePt);
+
+        //    // 7. Set block position explicitly to bubble point
+        //    //ml.BlockPosition = bubblePt;
+
+        //    // 8. Set Block Attribute (PH value)
+        //    BlockTableRecord btr = (BlockTableRecord)tr.GetObject(blockId, OpenMode.ForRead);
+        //    foreach (ObjectId id in btr)
+        //    {
+        //        AttributeDefinition attDef = tr.GetObject(id, OpenMode.ForRead) as AttributeDefinition;
+        //        if (attDef != null && attDef.Tag.Equals("PH", StringComparison.OrdinalIgnoreCase))
+        //        {
+        //            using (AttributeReference attRef = new AttributeReference())
+        //            {
+        //                attRef.SetAttributeFromBlock(attDef, Matrix3d.Identity);
+        //                attRef.TextString = phValue;
+        //                ml.SetBlockAttribute(id, attRef);
+        //            }
+        //            break;
+        //        }
+        //    }
+
+        //    // 9. Force geometry recomputation
+        //    ml.RecordGraphicsModified(true);
+        //}
         public void CreatePHMLeader(Transaction tr, Database db, Point3d arrowheadPt, string phValue)
         {
             // 1. Define Fixed Offset
@@ -200,8 +276,6 @@ namespace Rough_Works
             // 2. Access Style and Block
             DBDictionary mlStyleDict = (DBDictionary)tr.GetObject(db.MLeaderStyleDictionaryId, OpenMode.ForRead);
             ObjectId styleId = db.MLeaderstyle;
-
-            // Check for "BUBBLE" style specifically
             if (mlStyleDict.Contains("BUBBLE"))
                 styleId = mlStyleDict.GetAt("BUBBLE");
 
@@ -209,40 +283,45 @@ namespace Rough_Works
             if (!bt.Has("CIRCLE FOR LEADER")) return;
             ObjectId blockId = bt["CIRCLE FOR LEADER"];
 
-            // 3. Create MLeader Instance
+            // 3. Create MLeader and append to Model Space
             MLeader ml = new MLeader();
             ml.SetDatabaseDefaults();
 
-            // --- FIX: ALWAYS TARGET MODEL SPACE ---
-            // Instead of db.CurrentSpaceId, we use SymbolUtilityServices to get Model Space
             ObjectId modelSpaceId = SymbolUtilityServices.GetBlockModelSpaceId(db);
             BlockTableRecord ms = (BlockTableRecord)tr.GetObject(modelSpaceId, OpenMode.ForWrite);
-
             ms.AppendEntity(ml);
             tr.AddNewlyCreatedDBObject(ml, true);
 
-            // 4. Set Content Properties
+            // 4. Apply style
             ml.MLeaderStyle = styleId;
-            ml.Layer = "0"; // Ensure Layer 0 is thawed and turned on
+
+            // 5. SET HARD SCALES (Bypassing Annotation Scaling)
             ml.ContentType = ContentType.BlockContent;
             ml.BlockContentId = blockId;
 
-            // Scale and Size
-            //double s = 0.48425;
-            double s = 19.37;
-            ml.BlockScale = new Scale3d(s, s, s);
-            ml.ArrowSize = 0.06053;
-            ml.LandingGap = 0.012;
+            // Turn OFF Annotation Scale so it doesn't conflict with your manual 19.36995 scale
             ml.EnableAnnotationScale = false;
 
-            // 5. Build Geometry
-            // Note: The order of AddLeader -> AddLeaderLine -> AddVertex is strict
+            // Set the overall MLeader scale to 1
+            ml.Scale = 1.0;
+
+            // Set the Block's internal X, Y, Z scales to your specific multiplier
+            double s = 19.36995;
+            ml.BlockScale = new Scale3d(s, s, s);
+
+            // Match your specific source properties
+            ml.Layer = "0";
+            ml.ArrowSize = 2.42124;
+            ml.LandingGap = 0.80290;
+            ml.BlockRotation = 0;
+
+            // 6. Build Geometryc
             int ldIdx = ml.AddLeader();
             int lnIdx = ml.AddLeaderLine(ldIdx);
             ml.AddFirstVertex(lnIdx, arrowheadPt);
             ml.AddLastVertex(lnIdx, bubblePt);
 
-            // 6. Set Attribute Data (PH Value)
+            // 7. Set Block Attribute (PH value)
             BlockTableRecord btr = (BlockTableRecord)tr.GetObject(blockId, OpenMode.ForRead);
             foreach (ObjectId id in btr)
             {
@@ -251,6 +330,7 @@ namespace Rough_Works
                 {
                     using (AttributeReference attRef = new AttributeReference())
                     {
+                        attRef.SetDatabaseDefaults();
                         attRef.SetAttributeFromBlock(attDef, Matrix3d.Identity);
                         attRef.TextString = phValue;
                         ml.SetBlockAttribute(id, attRef);
@@ -259,13 +339,112 @@ namespace Rough_Works
                 }
             }
 
-            // 7. Force Geometry Recomputation
-            // This is where we fix your error by passing 'true'
+            // 8. Force geometry recomputation
             ml.RecordGraphicsModified(true);
-
-            // If your API supports it, this ensures the block content is drawn
-            try { ml.DowngradeOpen(); } catch { }
         }
+
+        //public void CreatePHMLeader(Transaction tr, Database db, Point3d arrowheadPt, string phValue)
+        //{
+        //    // 1. Define Fixed Offset
+        //    double offsetX = 2.5;
+        //    double offsetY = 10.5;
+        //    Point3d bubblePt = new Point3d(arrowheadPt.X + offsetX, arrowheadPt.Y + offsetY, arrowheadPt.Z);
+
+        //    // 2. Access Style and Block
+        //    DBDictionary mlStyleDict = (DBDictionary)tr.GetObject(db.MLeaderStyleDictionaryId, OpenMode.ForRead);
+        //    ObjectId styleId = db.MLeaderstyle;
+        //    if (mlStyleDict.Contains("BUBBLE"))
+        //        styleId = mlStyleDict.GetAt("BUBBLE");
+
+        //    BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+        //    if (!bt.Has("CIRCLE FOR LEADER")) return;
+        //    ObjectId blockId = bt["CIRCLE FOR LEADER"];
+
+        //    // 3. Create MLeader and append to Model Space — NO SetDatabaseDefaults
+        //    MLeader ml = new MLeader();
+
+        //    ObjectId modelSpaceId = SymbolUtilityServices.GetBlockModelSpaceId(db);
+        //    BlockTableRecord ms = (BlockTableRecord)tr.GetObject(modelSpaceId, OpenMode.ForWrite);
+        //    ms.AppendEntity(ml);
+        //    tr.AddNewlyCreatedDBObject(ml, true);
+
+        //    // 4. Apply style first before any property overrides
+        //    ml.MLeaderStyle = styleId;
+
+        //    // 5. Set ALL properties to exact expected values
+        //    ml.Scale = 0;               // must be 0 to match existing correct MLeaders
+        //    ml.BlockScale = new Scale3d(19.36995, 19.36995, 19.36995); // exact model space scale
+        //    ml.EnableAnnotationScale = true;
+        //    ml.Layer = "0";
+
+        //    // Color = White (index 7)
+        //    ml.Color = Color.FromColorIndex(ColorMethod.ByAci, 7);
+
+        //    ml.ContentType = ContentType.BlockContent;
+        //    ml.BlockContentId = blockId;
+        //    ml.BlockRotation = 0;
+
+        //    // Arrow size = 2.42124 (exact expected value)
+        //    ml.ArrowSize = 2.42124;
+
+        //    // LandingGap drives the gap between leader line end and block
+        //    ml.LandingGap = 4.80000;
+
+        //    // 6. Set annotation scale to 1:1
+        //    // In Teigha/IntelliCAD, annotation scale is set via the database's
+        //    // current annotation scale object — find "1:1" in the scale dictionary
+        //    try
+        //    {
+        //        ObjectContextManager ocm = db.ObjectContextManager;
+        //        if (ocm != null)
+        //        {
+        //            ObjectContextCollection occ = ocm.GetContextCollection("ACDB_ANNOTATIONSCALES");
+        //            if (occ != null)
+        //            {
+        //                foreach (ObjectContext oc in occ)
+        //                {
+        //                    AnnotationScale annScale = oc as AnnotationScale;
+        //                    if (annScale != null &&
+        //                        (annScale.Name == "1:1" || annScale.Name == "1 : 1"))
+        //                    {
+        //                        ml.AddContext(annScale);
+        //                        break;
+        //                    }
+        //                }
+        //            }
+        //        }
+        //    }
+        //    catch { /* annotation scale not critical — skip if API unavailable */ }
+
+        //    // 7. Build Geometry (strict order mandatory)
+        //    int ldIdx = ml.AddLeader();
+        //    int lnIdx = ml.AddLeaderLine(ldIdx);
+        //    ml.AddFirstVertex(lnIdx, arrowheadPt);
+        //    ml.AddLastVertex(lnIdx, bubblePt);
+
+        //    // 8. Set block position explicitly
+        //    ml.BlockPosition = bubblePt;
+
+        //    // 9. Set Block Attribute (PH value)
+        //    BlockTableRecord btr = (BlockTableRecord)tr.GetObject(blockId, OpenMode.ForRead);
+        //    foreach (ObjectId id in btr)
+        //    {
+        //        AttributeDefinition attDef = tr.GetObject(id, OpenMode.ForRead) as AttributeDefinition;
+        //        if (attDef != null && attDef.Tag.Equals("PH", StringComparison.OrdinalIgnoreCase))
+        //        {
+        //            using (AttributeReference attRef = new AttributeReference())
+        //            {
+        //                attRef.SetAttributeFromBlock(attDef, Matrix3d.Identity);
+        //                attRef.TextString = phValue;
+        //                ml.SetBlockAttribute(id, attRef);
+        //            }
+        //            break;
+        //        }
+        //    }
+
+        //    // 10. Force geometry recomputation
+        //    ml.RecordGraphicsModified(true);
+        //}
 
         [CommandMethod("BatchChSpaceMLeaders", CommandFlags.Modal)]
         public void BatchChSpaceMLeaders()

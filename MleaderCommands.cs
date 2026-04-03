@@ -12,130 +12,65 @@ using Teigha.Runtime;
 namespace Rough_Works
 {
     public class MLeaderCommands
-
     {
-
         // ─────────────────────────────────────────────────────────────
-
         //  Helper DTO to carry viewport data between transactions
-
         // ─────────────────────────────────────────────────────────────
-
         private class ViewportInfo
-
         {
-
             public ObjectId ViewportId { get; set; }
-
             public int VpNumber { get; set; }   // CVPORT number
-
             public Point2d ViewCenter { get; set; }   // Model-space centre of the view
-
             public double ViewHeight { get; set; }   // Model-space height of the view
-
             public double PsWidth { get; set; }   // Paper-space width  of the viewport frame
-
             public double PsHeight { get; set; }   // Paper-space height of the viewport frame
-
         }
 
 
 
         // ─────────────────────────────────────────────────────────────
-
         //  Entry point
-
         // ─────────────────────────────────────────────────────────────
 
         [CommandMethod("MLEADER_CHSPACE_ALL")]
-
         public void MLeaderChspaceAll()
-
         {
-
             Document doc = Application.DocumentManager.MdiActiveDocument;
-
             Database db = doc.Database;
-
             Editor ed = doc.Editor;
 
 
 
             // ── Save state we will restore at the end ──
-
             string savedLayout = LayoutManager.Current.CurrentLayout;
-
             object savedTileMode = Application.GetSystemVariable("TILEMODE");
-
             object savedCvport = Application.GetSystemVariable("CVPORT");
-
             object savedPickfirst = Application.GetSystemVariable("PICKFIRST");
-
-
-
             try
-
             {
-
                 // Ensure PICKFIRST is ON so CHSPACE can consume the implied selection
-
                 Application.SetSystemVariable("PICKFIRST", 1);
-
-
-
                 // ── Step 1 : collect every paper-space layout name ──
-
                 List<string> paperLayouts = CollectPaperLayouts(db);
-
-
-
                 if (paperLayouts.Count == 0)
-
                 {
-
                     ed.WriteMessage("\nNo paper-space layouts found. Aborting.");
-
                     return;
-
                 }
-
-
-
                 // ── Step 2 : loop through layouts ──
-
                 foreach (string layoutName in paperLayouts)
-
                 {
-
                     ed.WriteMessage($"\n\n=== Layout : {layoutName} ===");
-
-
-
                     // Switch to paper space for this layout
-
                     LayoutManager.Current.CurrentLayout = layoutName;
-
                     Application.SetSystemVariable("TILEMODE", 0); // ensure paper space
-
-
-
                     // Collect viewport data (own transaction – read-only)
-
                     List<ViewportInfo> viewports = CollectViewportsInLayout(db, layoutName);
-
-
-
                     if (viewports.Count == 0)
-
                     {
-
                         ed.WriteMessage("  No active viewports found.");
-
                         continue;
-
                     }
-
-
 
                     // ── Step 3 : loop through viewports ──
 
@@ -455,5 +390,206 @@ namespace Rough_Works
             ed.WriteMessage("\nMLeader pushed to Paper Space.");
         }
 
+
+        [CommandMethod("RUN_MLEADER_CHSPACE")]
+        public void RunMLeaderChspace()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Database db = doc.Database;
+            Editor ed = doc.Editor;
+
+            string originalLayout = LayoutManager.Current.CurrentLayout;
+
+            try
+            {
+                List<string> paperLayouts = GetPaperLayouts(db);
+
+                if (paperLayouts.Count == 0)
+                {
+                    ed.WriteMessage("\nNo paper layouts found.");
+                    return;
+                }
+
+                foreach (string layoutName in paperLayouts)
+                {
+                    ed.WriteMessage($"\n--- Processing Layout: {layoutName} ---");
+
+                    // Switch to this paper layout (paper space)
+                    LayoutManager.Current.CurrentLayout = layoutName;
+                    Application.SetSystemVariable("TILEMODE", 0);
+
+                    List<ViewportData> viewports = GetViewportsInLayout(db, layoutName);
+
+                    if (viewports.Count == 0)
+                    {
+                        ed.WriteMessage("\n  No viewports found. Skipping.");
+                        continue;
+                    }
+
+                    foreach (ViewportData vpData in viewports)
+                    {
+                        ed.WriteMessage($"\n  Entering MSPACE - Viewport #{vpData.Number}");
+
+                        // Activate MSPACE inside this specific viewport
+                        Application.SetSystemVariable("CVPORT", vpData.Number);
+
+                        // Directly read MLeaders from model space and check against viewport bounds
+                        ObjectId[] mleaderIds = GetMLeadersFromModelSpace(db, ed, vpData);
+
+                        if (mleaderIds.Length == 0)
+                        {
+                            ed.WriteMessage($"\n  No MLeaders found in Viewport #{vpData.Number}. Skipping.");
+                            continue;
+                        }
+
+                        ed.WriteMessage($"\n  Found {mleaderIds.Length} MLeader(s) in Viewport #{vpData.Number}.");
+
+                        // Set the implied selection with found MLeaders
+                        SelectionSet ss = SelectionSet.FromObjectIds(mleaderIds);
+                        ed.SetImpliedSelection(ss);
+
+                        // Execute CHSPACE - moves objects from model space to paper space
+                        ed.WriteMessage($"\n  Executing CHSPACE...");
+                        doc.SendStringToExecute("CHSPACE\n \n ", true, false, true);
+
+                        ed.WriteMessage($"\n  CHSPACE executed for {mleaderIds.Length} MLeader(s).");
+                    }
+                }
+            }
+            finally
+            {
+                LayoutManager.Current.CurrentLayout = originalLayout;
+                ed.WriteMessage("\n\nFinished. Original layout restored.");
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        // Viewport data carrier
+        // ─────────────────────────────────────────────────────────────
+        private class ViewportData
+        {
+            public ObjectId Id { get; set; }
+            public int Number { get; set; }
+            public Point2d ViewCenter { get; set; }  // model-space centre of the view
+            public double ViewHeight { get; set; }  // model-space height
+            public double Width { get; set; }  // paper-space frame width
+            public double Height { get; set; }  // paper-space frame height
+            public Point3d CenterPS { get; set; }  // paper-space centre of the frame
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        // Get all paper-space layout names
+        // ─────────────────────────────────────────────────────────────
+        private List<string> GetPaperLayouts(Database db)
+        {
+            var layouts = new List<string>();
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                var dict = (DBDictionary)tr.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
+                foreach (DBDictionaryEntry entry in dict)
+                {
+                    var layout = (Layout)tr.GetObject(entry.Value, OpenMode.ForRead);
+                    if (!layout.ModelType)
+                        layouts.Add(layout.LayoutName);
+                }
+                tr.Commit();
+            }
+            return layouts;
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        // Get all active real viewports (skip pseudo-viewport #1)
+        // ─────────────────────────────────────────────────────────────
+        private List<ViewportData> GetViewportsInLayout(Database db, string layoutName)
+        {
+            var result = new List<ViewportData>();
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                var dict = (DBDictionary)tr.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
+                var layout = (Layout)tr.GetObject(dict.GetAt(layoutName), OpenMode.ForRead);
+                var btr = (BlockTableRecord)tr.GetObject(layout.BlockTableRecordId, OpenMode.ForRead);
+
+                foreach (ObjectId id in btr)
+                {
+                    var vp = tr.GetObject(id, OpenMode.ForRead) as Viewport;
+                    if (vp == null || vp.Number <= 1 || !vp.On)
+                        continue;
+
+                    result.Add(new ViewportData
+                    {
+                        Id = id,
+                        Number = vp.Number,
+                        ViewCenter = vp.ViewCenter,
+                        ViewHeight = vp.ViewHeight,
+                        Width = vp.Width,
+                        Height = vp.Height,
+                        CenterPS = vp.CenterPoint
+                    });
+                }
+                tr.Commit();
+            }
+            return result;
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        // Directly iterate model space block table record and
+        // check each MULTILEADER against the viewport's model-space bounds.
+        // This bypasses SelectCrossingWindow which is unreliable in MSPACE.
+        // ─────────────────────────────────────────────────────────────
+        private ObjectId[] GetMLeadersFromModelSpace(Database db, Editor ed, ViewportData vpData)
+        {
+            var found = new List<ObjectId>();
+
+            // Compute model-space visible extents of this viewport
+            double aspectRatio = (vpData.Height > 0) ? vpData.Width / vpData.Height : 1.0;
+            double halfH = vpData.ViewHeight / 2.0;
+            double halfW = halfH * aspectRatio;
+
+            double minX = vpData.ViewCenter.X - halfW;
+            double maxX = vpData.ViewCenter.X + halfW;
+            double minY = vpData.ViewCenter.Y - halfH;
+            double maxY = vpData.ViewCenter.Y + halfH;
+
+            ed.WriteMessage($"\n    VP Bounds → X:[{minX:F2} to {maxX:F2}] Y:[{minY:F2} to {maxY:F2}]");
+
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                // Open model space block table record directly
+                var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+                var btr = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
+
+                foreach (ObjectId id in btr)
+                {
+                    // Only process MULTILEADER entities
+                    var mleader = tr.GetObject(id, OpenMode.ForRead) as MLeader;
+                    if (mleader == null)
+                        continue;
+
+                    // Use the MLeader's GeometricExtents to check if it falls within viewport bounds
+                    try
+                    {
+                        Extents3d ext = mleader.GeometricExtents;
+
+                        // Check if the MLeader's extents overlap or sit within the viewport bounds
+                        bool withinX = ext.MinPoint.X <= maxX && ext.MaxPoint.X >= minX;
+                        bool withinY = ext.MinPoint.Y <= maxY && ext.MaxPoint.Y >= minY;
+
+                        if (withinX && withinY)
+                        {
+                            found.Add(id);
+                            ed.WriteMessage($"\n    ✔ MLeader found at [{ext.MinPoint.X:F2}, {ext.MinPoint.Y:F2}]");
+                        }
+                    }
+                    catch
+                    {
+                        // GeometricExtents can throw if entity has no geometry — skip safely
+                    }
+                }
+
+                tr.Commit();
+            }
+
+            return found.ToArray();
+        }
     }
 }

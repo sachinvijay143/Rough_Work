@@ -66,6 +66,7 @@
     <Compile Include="Misc.cs" />
     <Compile Include="Mleader Reading.cs" />
     <Compile Include="MleaderCommands.cs" />
+    <Compile Include="MLeaderTableCreator.cs" />
     <Compile Include="Pot-Hole Resequencing.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="StationLabelCommands.cs" />

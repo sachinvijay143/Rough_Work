@@ -231,20 +231,21 @@ namespace Rough_Works
                     // --- Phase C: Activate layout and ask for point (outside transaction) ---
                     Application.SetSystemVariable("CTAB", layoutName);
 
-                    PromptPointOptions ppo =
-                        new PromptPointOptions(
-                            "\n  [" + layoutName + "] Pick table insertion point: ");
-                    PromptPointResult ppr = ed.GetPoint(ppo);
+                    //PromptPointOptions ppo =
+                    //    new PromptPointOptions(
+                    //        "\n  [" + layoutName + "] Pick table insertion point: ");
+                    //PromptPointResult ppr = ed.GetPoint(ppo);
 
-                    if (ppr.Status != PromptStatus.OK)
-                    {
-                        ed.WriteMessage(
-                            "\n[WARN] Point pick cancelled for layout: "
-                            + layoutName + ". Skipping.");
-                        continue;
-                    }
+                    //if (ppr.Status != PromptStatus.OK)
+                    //{
+                    //    ed.WriteMessage(
+                    //        "\n[WARN] Point pick cancelled for layout: "
+                    //        + layoutName + ". Skipping.");
+                    //    continue;
+                    //}
 
-                    Point3d tableOrigin = ppr.Value;
+                    //Point3d tableOrigin = ppr.Value;
+                    Point3d tableOrigin = new Point3d(8.26981, 21.13732, 0);
 
                     // --- Phase D: Insert table in a fresh transaction ---
                     using (Transaction tr = db.TransactionManager.StartTransaction())

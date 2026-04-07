@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.Windows.Forms;
 using Teigha.DatabaseServices;
 using Teigha.Geometry;
 using Teigha.Runtime;
@@ -723,6 +724,36 @@ namespace Rough_Works
 
         private static void WriteCsv(string path, List<CsvRow> rows)
         {
+            // Check if the CSV file is currently open/locked
+            bool isFileLocked = true;
+            while (isFileLocked)
+            {
+                try
+                {
+                    using (FileStream fs = File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                    {
+                        // File is not locked, we can proceed
+                        isFileLocked = false;
+                    }
+                }
+                catch (IOException)
+                {
+                    // File is locked – prompt user to close it
+                    DialogResult result = MessageBox.Show(
+                        "The file below is currently open. Please close it and click Retry, or click Cancel to skip saving.\n\n" + path,
+                        "Please Close the Pothole Information CSV File",
+                        MessageBoxButtons.RetryCancel,
+                        MessageBoxIcon.Warning);
+
+                    if (result == DialogResult.Cancel)
+                    {
+                        return; // Skip writing
+                    }
+                    // If Retry, the while loop will try again
+                }
+            }
+
+            // --- original write logic below, unchanged ---
             Encoding enc = new UTF8Encoding(true);
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("Sequence,SHTNUM,Utility,X,Y,Z");
@@ -736,6 +767,8 @@ namespace Rough_Works
                 sb.AppendLine(r.Z.ToString("F8"));
             }
             File.WriteAllText(path, sb.ToString(), enc);
+            string backup = path.Replace(".csv", "_backup.csv");
+            File.Copy(path, backup, true);
         }
 
         private static string SafeF(

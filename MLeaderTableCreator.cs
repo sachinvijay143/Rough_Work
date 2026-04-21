@@ -10,6 +10,7 @@ using System.Windows.Forms;
 using Teigha.DatabaseServices;
 using Teigha.Geometry;
 using Teigha.Runtime;
+using Application = IntelliCAD.ApplicationServices.Application;
 
 namespace Rough_Works
 {

@@ -971,6 +971,96 @@ namespace Rough_Works
             ed.WriteMessage("\n✔ Test MLeader created. Check size matches template.");
         }
 
+        [CommandMethod("GetGridwiseLength")]
+        public void GetGridwiseLength()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Database db = doc.Database;
+            Editor ed = doc.Editor;
+
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                // Filter for Grids
+                TypedValue[] gridFilter = { new TypedValue(0, "LWPOLYLINE"), new TypedValue(8, "VIEWPORT") };
+                PromptSelectionResult gridRes = ed.SelectAll(new SelectionFilter(gridFilter));
+
+                // Filter for BOC Polylines
+                TypedValue[] bocFilter = { new TypedValue(0, "LWPOLYLINE"), new TypedValue(8, "BOC") };
+                PromptSelectionResult bocRes = ed.SelectAll(new SelectionFilter(bocFilter));
+
+                if (gridRes.Status != PromptStatus.OK || bocRes.Status != PromptStatus.OK) return;
+
+                ObjectId[] bocIds = bocRes.Value.GetObjectIds();
+
+                foreach (SelectedObject gridObj in gridRes.Value)
+                {
+                    Polyline gridPl = (Polyline)tr.GetObject(gridObj.ObjectId, OpenMode.ForRead);
+                    if (!gridPl.Closed) continue;
+
+                    double totalLengthInGrid = 0;
+
+                    foreach (ObjectId bocId in bocIds)
+                    {
+                        Polyline bocPl = (Polyline)tr.GetObject(bocId, OpenMode.ForRead);
+
+                        Point3dCollection interPts = new Point3dCollection();
+                        bocPl.IntersectWith(gridPl, Intersect.OnBothOperands, interPts, IntPtr.Zero, IntPtr.Zero);
+
+                        if (interPts.Count > 0)
+                        {
+                            // Collect parameters for splitting
+                            DoubleCollection paramsAtPts = new DoubleCollection();
+                            foreach (Point3d pt in interPts)
+                            {
+                                paramsAtPts.Add(bocPl.GetParameterAtPoint(pt));
+                            }
+
+                            using (DBObjectCollection segments = bocPl.GetSplitCurves(paramsAtPts))
+                            {
+                                foreach (Curve seg in segments)
+                                {
+                                    // Accuracy Check: Test the midpoint of the segment
+                                    Point3d midPt = seg.GetPointAtParameter((seg.StartParam + seg.EndParam) / 2);
+                                    if (IsPointInsidePolyline(gridPl, midPt))
+                                    {
+                                        totalLengthInGrid += (seg.EndParam - seg.StartParam); // Use Length property if preferred
+                                    }
+                                    seg.Dispose();
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Case: BOC is entirely inside or entirely outside
+                            if (IsPointInsidePolyline(gridPl, bocPl.StartPoint))
+                                totalLengthInGrid += bocPl.Length;
+                        }
+                    }
+                    ed.WriteMessage($"\nGrid {gridPl.Handle}: Total BOC Length = {totalLengthInGrid:F4}");
+                }
+                tr.Commit();
+            }
+        }
+
+        // Precise Point-in-Polygon check using the Winding Number logic
+        private bool IsPointInsidePolyline(Polyline pl, Point3d pt)
+        {
+            bool inside = false;
+            int nvert = pl.NumberOfVertices;
+            for (int i = 0, j = nvert - 1; i < nvert; j = i++)
+            {
+                Point2d vertexI = pl.GetPoint2dAt(i);
+                Point2d vertexJ = pl.GetPoint2dAt(j);
+
+                if (((vertexI.Y > pt.Y) != (vertexJ.Y > pt.Y)) &&
+                    (pt.X < (vertexJ.X - vertexI.X) * (pt.Y - vertexI.Y) / (vertexJ.Y - vertexI.Y) + vertexI.X))
+                {
+                    inside = !inside;
+                }
+            }
+            return inside;
+        }
+
     }
 
     // --- Data model for label info ---
@@ -982,4 +1072,6 @@ namespace Rough_Works
         public string Position { get; set; } = "N/A";
         public string Source { get; set; } = "N/A";
     }
+
+
 }

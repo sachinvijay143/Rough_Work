@@ -54,6 +54,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="AutoDimCommand.cs" />
+    <Compile Include="AutoDimRectCommand.cs" />
     <Compile Include="Class1.cs" />
     <Compile Include="Common_functions.cs" />
     <Compile Include="Email_notification_task.cs" />

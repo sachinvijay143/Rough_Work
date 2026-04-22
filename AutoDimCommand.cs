@@ -280,6 +280,8 @@ namespace Rough_Works
                     dimStyleId);
 
                 double dimAngle = Common_functions.GetAngleBetweenPoints(xLine1, xLine2);
+                double dist=Common_functions.GetDistanceBetweenPoints(xLine1, xLine2);
+                dist = dist + 0;
                 Point3d txtpnt = Common_functions.PolarPoint(xLine1, dimAngle, 53);
 
                 ad.Layer = DIM_LAYER;
@@ -507,5 +509,6 @@ namespace Rough_Works
         public string LayerName { get; set; }
         public double Distance { get; set; }
         public Point3d IntersectPt { get; set; }
+        public string DedupKey { get; set; }
     }
 }

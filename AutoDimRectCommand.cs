@@ -19,16 +19,27 @@ namespace Rough_Works
         // ─────────────────────────────────────────────
         // CONFIGURATION
         // ─────────────────────────────────────────────
-        private static readonly Dictionary<string, string> LayerSuffixMap =
-            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        public struct LayerConfig
+        {
+            public string Suffix { get; }
+            public double TextWidth { get; }   // pre-measured suffix pixel width
+
+            public LayerConfig(string suffix, double textWidth)
             {
-            { "WATER",           "' WATER"        },
-            { "SS",              "' SEWER"        },
-            { "BOC",             "' BOC"          },
-            { "SIDEWALK",        "' S/W"          },
-            { "ROW",             "' ROW"          },
-            { "EASEMENTS",       "' PUE"          },
-            { "PROPOSED TRENCH", "' PROP. TRENCH" },
+                Suffix = suffix;
+                TextWidth = textWidth;
+            }
+        }
+        private static readonly Dictionary<string, LayerConfig> LayerSuffixMap =
+            new Dictionary<string, LayerConfig>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "WATER",           new LayerConfig("' WATER",        20.5  ) },
+                { "SS",              new LayerConfig("' SEWER",        20.5  ) },
+                { "BOC",             new LayerConfig("' BOC",          11.66 ) },
+                { "SIDEWALK",        new LayerConfig("' S/W",          10.41 ) },
+                { "ROW",             new LayerConfig("' ROW",          13.39 ) },
+                { "EASEMENTS",       new LayerConfig("' PUE",          11.01 ) },
+                { "PROPOSED TRENCH", new LayerConfig("' PROP. TRENCH", 41.7  ) },
             };
 
         private const string DIM_LAYER = "DIMENSIONS";
@@ -77,8 +88,7 @@ namespace Rough_Works
                 // ── Step 3: Draw a visual rectangle on screen ──
                 DrawVisualRectangle(db, rect);
 
-                // ── Step 4: Compute rayLength from full model extents
-                //            so it works at any zoom level ──
+                // ── Step 4: Compute rayLength from full model extents ──
                 double rayLength = ComputeRayLength(db);
 
                 ed.WriteMessage(
@@ -126,14 +136,130 @@ namespace Rough_Works
                         var placedLeft = new HashSet<string>();
                         var placedRight = new HashSet<string>();
 
-                        // ── Walk Centerline ──
+                        // ─────────────────────────────────────────
+                        // PRE-PASS: collect ALL dims on both sides
+                        // across every station so we can find the
+                        // true largest distance before placing anything.
+                        // ─────────────────────────────────────────
+                        var allLeftDims = new List<DimResult>();
+                        var allRightDims = new List<DimResult>();
+
                         double total = cl.Length;
                         double currentDist = 0.0;
 
+                        // Temporary dedup sets just for the pre-pass
+                        var preLeft = new HashSet<string>();
+                        var preRight = new HashSet<string>();
+
                         while (currentDist <= total)
                         {
-                            Point3d clPt =
-                                cl.GetPointAtDist(currentDist);
+                            Point3d clPt = cl.GetPointAtDist(currentDist);
+
+                            if (!PointInRect(clPt, rect))
+                            {
+                                currentDist += INTERVAL;
+                                continue;
+                            }
+
+                            Vector3d tangent =
+                                cl.GetFirstDerivative(clPt).GetNormal();
+                            Vector3d perpLeft =
+                                new Vector3d(-tangent.Y, tangent.X, 0);
+                            Vector3d perpRight =
+                                new Vector3d(tangent.Y, -tangent.X, 0);
+
+                            foreach (var kvp in layerEntities)
+                            {
+                                string lyrName = kvp.Key;
+                                List<Curve> curves = kvp.Value;
+
+                                // Left
+                                Point3d? lPt = FindNearestIntersection(
+                                    clPt,
+                                    clPt + perpLeft * rayLength,
+                                    curves);
+                                if (lPt.HasValue)
+                                {
+                                    double dist = clPt.DistanceTo(lPt.Value);
+                                    string key =
+                                        $"{lyrName}|{Math.Round(dist, 0)}";
+                                    if (!preLeft.Contains(key))
+                                    {
+                                        preLeft.Add(key);
+                                        allLeftDims.Add(new DimResult
+                                        {
+                                            LayerName = lyrName,
+                                            Distance = dist,
+                                            IntersectPt = lPt.Value,
+                                            DedupKey = key
+                                        });
+                                    }
+                                }
+
+                                // Right
+                                Point3d? rPt = FindNearestIntersection(
+                                    clPt,
+                                    clPt + perpRight * rayLength,
+                                    curves);
+                                if (rPt.HasValue)
+                                {
+                                    double dist = clPt.DistanceTo(rPt.Value);
+                                    string key =
+                                        $"{lyrName}|{Math.Round(dist, 0)}";
+                                    if (!preRight.Contains(key))
+                                    {
+                                        preRight.Add(key);
+                                        allRightDims.Add(new DimResult
+                                        {
+                                            LayerName = lyrName,
+                                            Distance = dist,
+                                            IntersectPt = rPt.Value,
+                                            DedupKey = key
+                                        });
+                                    }
+                                }
+                            }
+
+                            currentDist += INTERVAL;
+                        }
+
+                        // ── Compute the largest distance on each side ──
+                        // This is the value that replaces the hardcoded 43.
+                        // It represents the measured length of the longest
+                        // dimension string so text anchor is always offset
+                        // correctly regardless of how large the dims get.
+                        double largestLeftDist = allLeftDims.Any()
+                            ? allLeftDims.Max(d => d.Distance)
+                            : 0.0;
+                        double largestRightDist = allRightDims.Any()
+                            ? allRightDims.Max(d => d.Distance)
+                            : 0.0;
+
+                        // Convert largest distance to a text-position
+                        // anchor offset using the same formula pattern
+                        // already in PlaceStackedDims:
+                        //   distValue = ((distValue + suffixLen) / 2) + anchor
+                        // We compute the raw "measured length" contribution
+                        // from the largest distance value the same way the
+                        // dimension number string length is computed.
+                        double largestLeftAnchor =
+                            ComputeAnchorOffset(largestLeftDist, LayerSuffixMap);
+                        double largestRightAnchor =
+                            ComputeAnchorOffset(largestRightDist, LayerSuffixMap);
+
+                        ed.WriteMessage(
+                            $"\nLargest LEFT dist : {largestLeftDist:F1}  " +
+                            $"anchor: {largestLeftAnchor:F2}");
+                        ed.WriteMessage(
+                            $"\nLargest RIGHT dist: {largestRightDist:F1}  " +
+                            $"anchor: {largestRightAnchor:F2}");
+
+                        // ── Main placement pass ──
+                        currentDist = 0.0;
+
+                        while (currentDist <= total)
+                        {
+                            Point3d clPt = cl.GetPointAtDist(currentDist);
 
                             if (!PointInRect(clPt, rect))
                             {
@@ -156,7 +282,7 @@ namespace Rough_Works
                                 string lyrName = kvp.Key;
                                 List<Curve> curves = kvp.Value;
 
-                                // ── Left side ──
+                                // Left
                                 Point3d? lPt = FindNearestIntersection(
                                     clPt,
                                     clPt + perpLeft * rayLength,
@@ -176,7 +302,7 @@ namespace Rough_Works
                                         });
                                 }
 
-                                // ── Right side ──
+                                // Right
                                 Point3d? rPt = FindNearestIntersection(
                                     clPt,
                                     clPt + perpRight * rayLength,
@@ -197,22 +323,24 @@ namespace Rough_Works
                                 }
                             }
 
-                            leftDims =
-                                leftDims.OrderBy(d => d.Distance).ToList();
-                            rightDims =
-                                rightDims.OrderBy(d => d.Distance).ToList();
+                            leftDims = leftDims.OrderBy(d => d.Distance).ToList();
+                            rightDims = rightDims.OrderBy(d => d.Distance).ToList();
 
                             PlaceStackedDims(tr, mSpace,
                                 clPt, tangent, perpLeft,
                                 leftDims, dimStyleId,
                                 STACK_GAP, BEYOND_OFFSET,
-                                isLeft: true, rect, placedLeft);
+                                isLeft: true, rect,
+                                placedLeft,
+                                largestLeftAnchor);   // ← largest anchor
 
                             PlaceStackedDims(tr, mSpace,
                                 clPt, tangent, perpRight,
                                 rightDims, dimStyleId,
                                 STACK_GAP, BEYOND_OFFSET,
-                                isLeft: false, rect, placedRight);
+                                isLeft: false, rect,
+                                placedRight,
+                                largestRightAnchor);  // ← largest anchor
 
                             currentDist += INTERVAL;
                         }
@@ -233,6 +361,157 @@ namespace Rough_Works
                 ed.Command("_.DIMASSOC", originalDimassoc);
                 db.DimAssoc = originalDimassoc;
                 ed.WriteMessage($"\nDIMASSC restored to: {originalDimassoc}");
+            }
+        }
+
+
+        // ─────────────────────────────────────────────
+        // COMPUTE ANCHOR OFFSET FROM LARGEST DISTANCE
+        // ─────────────────────────────────────────────
+        /// <summary>
+        /// Mirrors the distValue formula in PlaceStackedDims but uses
+        /// the largest distance on a side as the base, so every dim on
+        /// that side uses a consistent anchor regardless of its own value.
+        ///
+        /// Formula (same as PlaceStackedDims):
+        ///   rawDist    = rounded distance as string length × 3.5
+        ///   suffixLen  = longest suffix in the map × 3.34
+        ///   anchor     = ((rawDist + suffixLen) / 2) + largestMeasuredLen
+        ///
+        /// The "largestMeasuredLen" term is what replaces the old 43 —
+        /// it is derived from the largest distance value itself so the
+        /// text always sits proportionally beyond the longest dim line.
+        /// </summary>
+        private double ComputeAnchorOffset(
+            double largestDist,
+            Dictionary<string, LayerConfig> suffixMap)
+        {
+            if (largestDist <= 0) return 43.0; // safe fallback
+
+            // Reproduce how the dim number string length is estimated
+            string distStr = Math.Round(largestDist, 0).ToString();
+            double rawDistLen = distStr.Length * 3.5;
+
+            // Use the longest suffix in the map as the worst-case width
+            double maxTextWidth = suffixMap.Values.Max(c => c.TextWidth);
+            double measuredLenAnchor = rawDistLen;
+
+            return ((rawDistLen + maxTextWidth) / 2.0) + measuredLenAnchor;
+        }
+
+
+        // ─────────────────────────────────────────────
+        // PLACE STACKED ALIGNED DIMENSIONS
+        // ─────────────────────────────────────────────
+        private void PlaceStackedDims(
+    Transaction tr,
+    BlockTableRecord mSpace,
+    Point3d clPt,
+    Vector3d tangent,
+    Vector3d perpDir,
+    List<DimResult> dims,
+    ObjectId dimStyleId,
+    double stackGap,
+    double beyondOffset,
+    bool isLeft,
+    Extents2d rect,
+    HashSet<string> placedKeys,
+    double largestAnchor)
+        {
+            if (!dims.Any()) return;
+
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor ed = doc.Editor;
+
+            double maxDist = dims.Max(d => d.Distance);
+
+            for (int i = 0; i < dims.Count; i++)
+            {
+                DimResult dim = dims[i];
+
+                if (placedKeys.Contains(dim.DedupKey))
+                    continue;
+
+                // ── Get LayerConfig FIRST ──
+                LayerConfig config;
+                if (!LayerSuffixMap.TryGetValue(dim.LayerName, out config))
+                {
+                    ed.WriteMessage(
+                        $"\n⚠️ No config found for layer: '{dim.LayerName}' " +
+                        $"— skipping.");
+                    placedKeys.Add(dim.DedupKey);
+                    continue;
+                }
+
+                // ── Debug: confirm config was found ──
+                ed.WriteMessage(
+                    $"\n✅ Layer: '{dim.LayerName}' " +
+                    $"Suffix: '{config.Suffix}' " +
+                    $"TextWidth: {config.TextWidth}");
+
+                double tangentShift = i * stackGap;
+                Point3d stationPt = clPt + tangent * tangentShift;
+
+                Point3d xLine1 = stationPt;
+                Point3d xLine2 = ProjectToPerp(
+                                        stationPt, perpDir, dim.IntersectPt);
+                Point3d dimLinePt = stationPt
+                                    + perpDir * (maxDist + beyondOffset);
+
+                if (!PointInRect(xLine2, rect))
+                    continue;
+
+                // ── Compute measured distance for DimensionText ──
+                double dist = Common_functions
+                                     .GetDistanceBetweenPoints(xLine1, xLine2);
+                double dimAngle = Common_functions
+                                     .GetAngleBetweenPoints(xLine1, xLine2);
+
+                // Round to nearest foot (matching Dimrnd = 1.0)
+                int roundedDist = (int)Math.Round(dist, 0);
+                string dimensionText = roundedDist.ToString() + config.Suffix;
+
+                ed.WriteMessage(
+                    $"\n   DimensionText will be: '{dimensionText}'");
+
+                // ── Create dimension ──
+                AlignedDimension ad = new AlignedDimension(
+                    xLine1, xLine2, dimLinePt,
+                    string.Empty, dimStyleId);
+
+                // ── Force the full text via DimensionText ──
+                // This is the ONLY reliable way in Teigha/IntelliCAD.
+                // "<>" = insert live measurement, but since Dimrnd rounds
+                // it and we want exact control, we set the full string
+                // explicitly instead so suffix is guaranteed to appear.
+                ad.DimensionText = dimensionText;
+
+                ad.Layer = DIM_LAYER;
+                ad.Dimasz = 2.75;
+                ad.Dimtxt = 3.5;
+                ad.Color = dim.LayerName.Equals(
+                                "PROPOSED TRENCH",
+                                StringComparison.OrdinalIgnoreCase)
+                            ? Color.FromColorIndex(ColorMethod.ByAci, 30)
+                            : Color.FromColorIndex(ColorMethod.ByBlock, 0);
+
+                // ── Text position using config.TextWidth ──
+                string distStr = roundedDist.ToString();
+                double distValue = distStr.Length * 3.5;
+
+                distValue = ((distValue + config.TextWidth) / 2.0)
+                            + largestAnchor;
+
+                Point3d txtpnt = Common_functions
+                                     .PolarPoint(xLine1, dimAngle, distValue);
+                ad.TextPosition = txtpnt;
+                ad.TextRotation = 0.0;
+
+                mSpace.AppendEntity(ad);
+                tr.AddNewlyCreatedDBObject(ad, true);
+                ad.DimLinePoint = ad.DimLinePoint;
+
+                placedKeys.Add(dim.DedupKey);
             }
         }
 
@@ -478,87 +757,6 @@ namespace Rough_Works
 
 
         // ─────────────────────────────────────────────
-        // PLACE STACKED ALIGNED DIMENSIONS
-        // ─────────────────────────────────────────────
-        private void PlaceStackedDims(
-            Transaction tr,
-            BlockTableRecord mSpace,
-            Point3d clPt,
-            Vector3d tangent,
-            Vector3d perpDir,
-            List<DimResult> dims,
-            ObjectId dimStyleId,
-            double stackGap,
-            double beyondOffset,
-            bool isLeft,
-            Extents2d rect,
-            HashSet<string> placedKeys)
-        {
-            if (!dims.Any()) return;
-
-            double maxDist = dims.Max(d => d.Distance);
-
-            for (int i = 0; i < dims.Count; i++)
-            {
-                DimResult dim = dims[i];
-
-                // ── Skip already placed layer+distance combos ──
-                if (placedKeys.Contains(dim.DedupKey))
-                    continue;
-
-                double tangentShift = i * stackGap;
-                Point3d stationPt = clPt + tangent * tangentShift;
-
-                Point3d xLine1 = stationPt;
-                Point3d xLine2 = ProjectToPerp(
-                                        stationPt, perpDir, dim.IntersectPt);
-                Point3d dimLinePt = stationPt
-                                    + perpDir * (maxDist + beyondOffset);
-
-                // ── Only check xLine2 against rect ──
-                if (!PointInRect(xLine2, rect))
-                    continue;
-
-                AlignedDimension ad = new AlignedDimension(
-                    xLine1, xLine2, dimLinePt,
-                    string.Empty, dimStyleId);
-
-                double dimAngle = Common_functions
-                                       .GetAngleBetweenPoints(xLine1, xLine2);
-                double dist = Common_functions.GetDistanceBetweenPoints(xLine1, xLine2);
-                string dst=dist.ToString();
-                double distValue = (dst.Length*3.5);
-                
-
-                ad.Layer = DIM_LAYER;
-                ad.Dimasz = 2.75;
-                ad.Dimtxt = 3.5;
-                ad.Color = dim.LayerName.Equals(
-                                "PROPOSED TRENCH",
-                                StringComparison.OrdinalIgnoreCase)
-                            ? Color.FromColorIndex(ColorMethod.ByAci, 30)
-                            : Color.FromColorIndex(ColorMethod.ByBlock, 0);
-
-                if (LayerSuffixMap.TryGetValue(
-                        dim.LayerName, out string suffix))
-                    ad.Suffix = suffix;
-                distValue = ((distValue + (ad.Suffix.Length * 3.34)) /2) + 43;
-                //MessageBox.Show("Suffix: " + suffix + "\\t distValue: " + distValue);
-                Point3d txtpnt = Common_functions.PolarPoint(xLine1, dimAngle, distValue);
-                ad.TextPosition = txtpnt;
-                ad.TextRotation = 0.0;
-
-                mSpace.AppendEntity(ad);
-                tr.AddNewlyCreatedDBObject(ad, true);
-                ad.DimLinePoint = ad.DimLinePoint;
-
-                // ── Register as placed ──
-                placedKeys.Add(dim.DedupKey);
-            }
-        }
-
-
-        // ─────────────────────────────────────────────
         // FIND NEAREST INTERSECTION
         // ─────────────────────────────────────────────
         private Point3d? FindNearestIntersection(
@@ -587,7 +785,6 @@ namespace Rough_Works
 
                     foreach (Point3d pt in pts)
                     {
-                        // Only accept points in the correct ray direction
                         Vector3d toIntersect = pt - rayStart;
                         Vector3d rayDir = rayEnd - rayStart;
 

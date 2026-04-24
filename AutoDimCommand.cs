@@ -280,7 +280,7 @@ namespace Rough_Works
                     dimStyleId);
 
                 double dimAngle = Common_functions.GetAngleBetweenPoints(xLine1, xLine2);
-                double dist=Common_functions.GetDistanceBetweenPoints(xLine1, xLine2);
+                double dist = Common_functions.GetDistanceBetweenPoints(xLine1, xLine2);
                 dist = dist + 0;
                 Point3d txtpnt = Common_functions.PolarPoint(xLine1, dimAngle, 53);
 
@@ -296,7 +296,7 @@ namespace Rough_Works
                 if (LayerSuffixMap.TryGetValue(dim.LayerName, out string suffix))
                     ad.Suffix = suffix;
 
-                ad.TextPosition=txtpnt;
+                ad.TextPosition = txtpnt;
                 ad.TextRotation = 0.0;
 
                 mSpace.AppendEntity(ad);

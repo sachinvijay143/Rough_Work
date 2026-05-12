@@ -101,21 +101,24 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
             ed.Command("_.DIMASSOC", 0);
             db.DimAssoc = 0;
 
+            // ── CHANGE: visualRectId is now tracked at command scope so the
+            //    finally block can erase it unconditionally on every exit path.
             ObjectId visualRectId = ObjectId.Null;
 
             try
             {
-                Point3d[] corners = PickFourPoints(ed);
-                if (corners == null) { ed.WriteMessage("\nAutoDimRect: cancelled."); return; }
+                // ── CHANGE: Two-corner rubber-band window replaces four-click pick.
+                //    PickRectangle returns the two diagonal corners; the visual
+                //    rectangle is drawn after the first corner is confirmed and
+                //    stored in visualRectId so finally() can always clean it up.
+                Extents2d? picked = PickRectangle(ed, db, out visualRectId);
+                if (!picked.HasValue)
+                {
+                    ed.WriteMessage("\nAutoDimRect: cancelled.");
+                    return;
+                }
 
-                double minX = corners.Min(p => p.X);
-                double maxX = corners.Max(p => p.X);
-                double minY = corners.Min(p => p.Y);
-                double maxY = corners.Max(p => p.Y);
-                              
-
-                Extents2d rect = new Extents2d(new Point2d(minX, minY), new Point2d(maxX, maxY));
-                visualRectId = DrawVisualRectangle(db, rect);
+                Extents2d rect = picked.Value;
 
                 ed.WriteMessage($"\n  Rect: MinX={rect.MinPoint.X:F2} MinY={rect.MinPoint.Y:F2} " +
                $"MaxX={rect.MaxPoint.X:F2} MaxY={rect.MaxPoint.Y:F2} " +
@@ -140,7 +143,7 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
                         {
                             ed.WriteMessage("\nNo CENTERLINE polyline or line found inside the selected rectangle.");
                             tr.Abort();
-                            if (!visualRectId.IsNull) EraseVisualRectangle(db, visualRectId);
+                            // ── CHANGE: no manual erase here — finally() handles it.
                             return;
                         }
 
@@ -166,9 +169,6 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
                                 try
                                 {
                                     Extents3d ext = ent.GeometricExtents;
-                                    //if (ext.MaxPoint.X < rect.MinPoint.X || ext.MinPoint.X > rect.MaxPoint.X ||
-                                    //    ext.MaxPoint.Y < rect.MinPoint.Y || ext.MinPoint.Y > rect.MaxPoint.Y)
-                                    //    continue;
                                     double bboxTol = 1.0;
                                     if (ext.MaxPoint.X < rect.MinPoint.X - bboxTol ||
                                         ext.MinPoint.X > rect.MaxPoint.X + bboxTol ||
@@ -201,7 +201,7 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
                         var allRightDims = new List<UtilityDimData>();
                         var preLeft = new HashSet<string>();
                         var preRight = new HashSet<string>();
-                        CollectDimCandidates(cl, layerEntities, rect,allLeftDims, allRightDims, preLeft, preRight, ed);
+                        CollectDimCandidates(cl, layerEntities, rect, allLeftDims, allRightDims, preLeft, preRight, ed);
 
 
                         double uniformLeft = ComputeUniformDimLineDist(allLeftDims, liveDimtxt, BEYOND_OFFSET, ed);
@@ -213,7 +213,7 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
                         var placeRightDims = new List<UtilityDimData>();
                         var placeLeftSeen = new HashSet<string>();
                         var placeRightSeen = new HashSet<string>();
-                        CollectDimCandidates(cl, layerEntities, rect,placeLeftDims, placeRightDims, placeLeftSeen, placeRightSeen, ed);
+                        CollectDimCandidates(cl, layerEntities, rect, placeLeftDims, placeRightDims, placeLeftSeen, placeRightSeen, ed);
 
                         var placedSuffixesLeft = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         var placedSuffixesRight = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -227,7 +227,7 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
 
                         tr.Commit();
                         ed.WriteMessage("\nAUTODIMRECT complete.");
-                        EraseVisualRectangle(db, visualRectId);
+                        // ── CHANGE: no manual erase here — finally() handles it.
                     }
                     catch (System.Exception ex)
                     {
@@ -240,7 +240,73 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
             {
                 ed.Command("_.DIMASSOC", originalDimassoc);
                 db.DimAssoc = originalDimassoc;
+
+                // ── CHANGE: erase the visual rectangle on every exit path —
+                //    success, early return, cancellation, and exception.
+                if (!visualRectId.IsNull)
+                    EraseVisualRectangle(db, visualRectId);
             }
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        // PICK RECTANGLE  (replaces PickFourPoints)
+        //
+        // Standard two-corner rubber-band window, matching native CAD UX:
+        //
+        //   1. Prompt for first corner — no rectangle yet.
+        //   2. After first corner is confirmed, draw the visual rectangle
+        //      immediately and store its ObjectId in visualRectId so the
+        //      finally block can erase it on any exit path.
+        //   3. Prompt for the opposite corner with UseBasePoint = true so
+        //      IntelliCAD/BricsCAD shows the rubber-band box while the user
+        //      drags.  The second prompt is cancellable independently.
+        //
+        // Returns null on any cancellation; the visualRectId out-param is
+        // set as soon as the first corner is picked (may be Null on cancel).
+        // ─────────────────────────────────────────────────────────────
+        private Extents2d? PickRectangle(Editor ed, Database db, out ObjectId visualRectId)
+        {
+            visualRectId = ObjectId.Null;
+
+            // ── First corner ──────────────────────────────────────────
+            PromptPointOptions ppo1 = new PromptPointOptions(
+                "\nSpecify first corner of work rectangle: ");
+            ppo1.AllowNone = false;
+            PromptPointResult ppr1 = ed.GetPoint(ppo1);
+            if (ppr1.Status != PromptStatus.OK)
+                return null;
+
+            Point3d corner1 = ppr1.Value;
+
+            // ── Second corner (rubber-band from first corner) ─────────
+            PromptCornerOptions pco = new PromptCornerOptions(
+                "\nSpecify opposite corner: ", corner1);
+            // PromptCornerOptions automatically rubber-bands from the base point
+            // and restricts the result to the opposite diagonal — no extra config needed.
+            PromptPointResult ppr2 = ed.GetCorner(pco);
+            if (ppr2.Status != PromptStatus.OK)
+                return null;
+
+            Point3d corner2 = ppr2.Value;
+
+            // ── Build axis-aligned extents ────────────────────────────
+            double minX = Math.Min(corner1.X, corner2.X);
+            double maxX = Math.Max(corner1.X, corner2.X);
+            double minY = Math.Min(corner1.Y, corner2.Y);
+            double maxY = Math.Max(corner1.Y, corner2.Y);
+
+            if (maxX - minX < 1e-6 || maxY - minY < 1e-6)
+            {
+                ed.WriteMessage("\nAutoDimRect: degenerate rectangle — please pick two distinct corners.");
+                return null;
+            }
+
+            Extents2d rect = new Extents2d(new Point2d(minX, minY), new Point2d(maxX, maxY));
+
+            // ── Draw visual rectangle and record its id for cleanup ───
+            visualRectId = DrawVisualRectangle(db, rect);
+
+            return rect;
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -268,7 +334,7 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
                                         tr, mSpace, cl, dimData.IntersectPt, dimData.Distance,
                                         cfg.Suffix, cfg.SuffixCharCount, startDist, globalIndex, gap, isLeft,
                                         uniformDimLineDist, dimStyleId, charW, dimData.LayerName, placedSuffixes,
-                                        layerEntities);   // ADD THIS
+                                        layerEntities);
                         if (placed) globalIndex++;
                     }
                 }
@@ -293,19 +359,17 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
                                                     dimData.IntersectPt, target.IntersectPt, pairDist,
                                                     pair.Sfx, pair.SfxChars, startDist, globalIndex, gap, isLeft,
                                                     uniformDimLineDist, dimStyleId, charW, placedSuffixes,
-                                                    layerEntities);   // ADD THIS
+                                                    layerEntities);
                     }
-                    // AFTER — replace that else block with:
                     else if (pair.Src.Equals("PROPERTY LINE", StringComparison.OrdinalIgnoreCase)
                           && pair.Tgt.Equals("VNAE LINE", StringComparison.OrdinalIgnoreCase))
                     {
-                        // dimData = PROPERTY LINE item, target = VNAE LINE item
                         placed = CreateVnaeDimension(
                                                     tr, mSpace, cl,
                                                     dimData.IntersectPt, target.IntersectPt, pairDist,
                                                     pair.Sfx, pair.SfxChars, startDist, globalIndex, gap, isLeft,
                                                     uniformDimLineDist, dimStyleId, charW, placedSuffixes,
-                                                    layerEntities);   // ADD THIS
+                                                    layerEntities);
                     }
                     else
                     {
@@ -313,15 +377,8 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
                                                         tr, mSpace, cl, target.IntersectPt, pairDist,
                                                         pair.Sfx, pair.SfxChars, startDist, globalIndex, gap, isLeft,
                                                         uniformDimLineDist, dimStyleId, charW, pair.Tgt, placedSuffixes,
-                                                        layerEntities);   // ADD THIS
+                                                        layerEntities);
                     }
-                    //else
-                    //{
-                    //    placed = CreateUniformDimension(
-                    //        tr, mSpace, cl, target.IntersectPt, pairDist,
-                    //        pair.Sfx, pair.SfxChars, startDist, globalIndex, gap, isLeft,
-                    //        uniformDimLineDist, dimStyleId, charW, pair.Tgt, placedSuffixes);
-                    //}
                     if (placed) globalIndex++;
                 }
             }
@@ -337,7 +394,7 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
     double startDist, int index, double gap, bool isLeft,
     double uniformDimLineDist, ObjectId dimStyleId,
     double charW, string layerName, HashSet<string> placedSuffixes,
-    Dictionary<string, List<Curve>> layerEntities)  // ADD THIS PARAMETER
+    Dictionary<string, List<Curve>> layerEntities)
         {
             if (placedSuffixes.Contains(suffix)) return false;
 
@@ -369,6 +426,7 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
             }
             mSpace.AppendEntity(ad);
             tr.AddNewlyCreatedDBObject(ad, true);
+            
 
             int totalChars = roundedDist.ToString().Length + suffixChars;
             double textOffset = uniformDimLineDist - ((totalChars * charW) * 0.5);
@@ -413,7 +471,7 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
     double startDist, int index, double gap, bool isLeft,
     double uniformDimLineDist, ObjectId dimStyleId,
     double charW, HashSet<string> placedSuffixes,
-    Dictionary<string, List<Curve>> layerEntities)  // ADD THIS PARAMETER
+    Dictionary<string, List<Curve>> layerEntities)
         {
             if (placedSuffixes.Contains(suffix)) return false;
 
@@ -442,6 +500,7 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
 
             mSpace.AppendEntity(ad);
             tr.AddNewlyCreatedDBObject(ad, true);
+            
 
             int totalChars = roundedDist.ToString().Length + suffixChars;
             double textOffset = uniformDimLineDist - ((totalChars * charW) * 0.5);
@@ -459,7 +518,7 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
     double startDist, int index, double gap, bool isLeft,
     double uniformDimLineDist, ObjectId dimStyleId,
     double charW, HashSet<string> placedSuffixes,
-    Dictionary<string, List<Curve>> layerEntities)  // ADD THIS PARAMETER
+    Dictionary<string, List<Curve>> layerEntities)
         {
             if (placedSuffixes.Contains(suffix)) return false;
 
@@ -487,6 +546,7 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
             ad.Color = Color.FromColorIndex(ColorMethod.ByLayer, 256);
             mSpace.AppendEntity(ad);
             tr.AddNewlyCreatedDBObject(ad, true);
+            
 
             int totalChars = roundedDist.ToString().Length + suffixChars;
             double textOffset = uniformDimLineDist - ((totalChars * charW) * 0.5);
@@ -533,6 +593,7 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
                     ad.Color = Color.FromColorIndex(ColorMethod.ByAci, 30);
                 mSpace.AppendEntity(ad);
                 tr.AddNewlyCreatedDBObject(ad, true);
+                
                 int totalChars = dimText.Length;
                 double textOffset = uniformDimLineDist - ((totalChars * charW) * 0.5);
                 ad.TextPosition = xLine1 + (perpDir * textOffset);
@@ -844,30 +905,12 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
                            : Color.FromColorIndex(ColorMethod.ByBlock, 0);
                 mSpace.AppendEntity(ad);
                 tr.AddNewlyCreatedDBObject(ad, true);
+                
                 ad.TextPosition = xLine1 + perpDir * textOffset;
                 ad.TextRotation = 0.0;
                 placedKeys.Add(labelKey);
                 index++;
             }
-        }
-
-        // ─────────────────────────────────────────────────────────────
-        // PICK FOUR POINTS
-        // ─────────────────────────────────────────────────────────────
-        private Point3d[] PickFourPoints(Editor ed)
-        {
-            var pts = new Point3d[4];
-            string[] labels = { "1st", "2nd", "3rd", "4th" };
-            for (int i = 0; i < 4; i++)
-            {
-                PromptPointOptions ppo = new PromptPointOptions($"\nPick {labels[i]} corner of work rectangle: ");
-                ppo.AllowNone = false;
-                if (i > 0) ppo.BasePoint = pts[i - 1];
-                PromptPointResult ppr = ed.GetPoint(ppo);
-                if (ppr.Status != PromptStatus.OK) return null;
-                pts[i] = ppr.Value;
-            }
-            return pts;
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -1177,6 +1220,25 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
             pt.Y >= rect.MinPoint.Y && pt.Y <= rect.MaxPoint.Y;
 
         // ─────────────────────────────────────────────────────────────
+        // APPLY TEXT VIEW DIRECTION
+        //
+        // Sets the TextViewDirection on an AlignedDimension based on the
+        // angle of the dimension vector (xLine1 → xLine2), measured in
+        // degrees (0–360, counter-clockwise from the positive X axis):
+        //
+        //   >  0° and <=  90°  →  Right-to-Left   (Q1: dimension runs up-right)
+        //   > 90° and <= 270°  →  Left-to-Right   (Q2 + Q3)
+        //   > 270° and <= 360° →  Left-to-Right   (Q4: dimension runs down-right)
+        //   exactly 0° / 360°  →  Left-to-Right   (degenerate / purely horizontal)
+        //
+        // Called immediately after tr.AddNewlyCreatedDBObject so the entity
+        // is in the database before property writes.  No other logic is
+        // affected — TextPosition and TextRotation are still set by each
+        // caller after this call returns.
+        // ─────────────────────────────────────────────────────────────
+        
+
+        // ─────────────────────────────────────────────────────────────
         // GET OR CREATE DIM STYLE
         // ─────────────────────────────────────────────────────────────
         private ObjectId GetOrCreateDimStyle(Database db, Transaction tr, double dimtxt, double dimasz)
@@ -1199,8 +1261,8 @@ namespace MagnaSoft_Drafting_Assistant_Tool_CobbFendley
             dstr.Dimclre = Color.FromColorIndex(ColorMethod.ByBlock, 0);
             dstr.Dimclrt = Color.FromColorIndex(ColorMethod.ByBlock, 0);
             dstr.Dimtxt = dimtxt; dstr.Dimgap = dimtxt * 0.09;
-            dstr.Dimatfit = 0; dstr.Dimtmove = 2; dstr.Dimtad = 0;
-            dstr.Dimtoh = true; dstr.Dimtih = false; dstr.Dimtix = false;
+            dstr.Dimatfit = 0; dstr.Dimtmove = 2; dstr.Dimtad = 0; //dstr.Dimtoh = true; dstr.Dimtih = false;
+            dstr.Dimtoh = false; dstr.Dimtih = true; dstr.Dimtix = false;
             dstr.Dimsoxd = false; dstr.Dimdec = 0; dstr.Dimzin = 8;
             dstr.Dimrnd = 1.0; dstr.Dimlunit = 2; dstr.Dimdsep = '.';
             dstr.Dimlfac = 1.0; dstr.Dimtol = false; dstr.Dimlim = false;
